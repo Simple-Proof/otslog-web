@@ -1,0 +1,1056 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>otslog — Live Viewer</title>
+    <style>
+        *, *::before, *::after {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        :root {
+            --bg-primary: #0d1117;
+            --bg-secondary: #161b22;
+            --border-color: #30363d;
+            --text-primary: #e6edf3;
+            --text-secondary: #8b949e;
+            --accent-color: #58a6ff;
+            --accent-hover: #79c0ff;
+            --accent-active: #388bfd;
+            --danger: #f85149;
+            --success: #3fb950;
+            --radius: 6px;
+            --font-mono: 'JetBrains Mono', 'Fira Code', 'SF Mono', 'Cascadia Code', monospace;
+            --font-body: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif;
+        }
+
+        html, body {
+            width: 100%;
+            height: 100%;
+        }
+
+        body {
+            font-family: var(--font-body);
+            background-color: var(--bg-primary);
+            color: var(--text-primary);
+            line-height: 1.5;
+        }
+
+        /* ── Layout ─────────────────────────────────────────── */
+        .shell {
+            display: grid;
+            grid-template-rows: auto 1fr;
+            height: 100vh;
+        }
+
+        .topbar {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 10px 20px;
+            border-bottom: 1px solid var(--border-color);
+            background: var(--bg-secondary);
+            flex-shrink: 0;
+        }
+
+        .topbar-brand {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .topbar-logo {
+            width: 28px;
+            height: 28px;
+            background: var(--accent-color);
+            border-radius: 4px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-weight: 700;
+            font-size: 12px;
+            color: var(--bg-primary);
+            letter-spacing: -0.5px;
+        }
+
+        .topbar h1 {
+            font-size: 15px;
+            font-weight: 600;
+            color: var(--text-primary);
+            letter-spacing: -0.3px;
+        }
+
+        .topbar-status {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            font-size: 12px;
+            color: var(--text-secondary);
+            font-family: var(--font-mono);
+        }
+
+        .status-dot {
+            width: 7px;
+            height: 7px;
+            border-radius: 50%;
+            background: var(--text-secondary);
+            transition: background 0.3s;
+        }
+
+        .status-dot.live {
+            background: var(--success);
+            box-shadow: 0 0 6px rgba(63, 185, 80, 0.5);
+            animation: pulse 2s ease-in-out infinite;
+        }
+
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.5; }
+        }
+
+        .content {
+            display: grid;
+            grid-template-columns: 1fr 320px;
+            gap: 0;
+            overflow: hidden;
+            min-height: 0;
+        }
+
+        /* ── Video Panel ──────────────────────────────────────── */
+        .video-panel {
+            display: flex;
+            flex-direction: column;
+            padding: 16px;
+            gap: 10px;
+            overflow: hidden;
+            min-height: 0;
+        }
+
+        .video-wrapper {
+            position: relative;
+            flex: 1;
+            background: #000;
+            border-radius: var(--radius);
+            border: 1px solid var(--border-color);
+            overflow: hidden;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            min-height: 0;
+        }
+
+        .video-wrapper video {
+            width: 100%;
+            height: 100%;
+            object-fit: contain;
+            display: block;
+        }
+
+        .video-overlay {
+            position: absolute;
+            inset: 0;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            gap: 12px;
+            pointer-events: none;
+            opacity: 1;
+            transition: opacity 0.4s;
+            background: rgba(13, 17, 23, 0.85);
+        }
+
+        .video-overlay.hidden {
+            opacity: 0;
+            pointer-events: none;
+        }
+
+        .video-overlay-icon {
+            width: 48px;
+            height: 48px;
+            border-radius: 50%;
+            border: 2px solid var(--border-color);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+
+        .video-overlay-icon svg {
+            width: 20px;
+            height: 20px;
+            fill: none;
+            stroke: var(--text-secondary);
+            stroke-width: 2;
+            stroke-linecap: round;
+            stroke-linejoin: round;
+        }
+
+        .video-overlay-text {
+            font-size: 13px;
+            color: var(--text-secondary);
+            font-family: var(--font-mono);
+        }
+
+        .video-bar {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 8px 12px;
+            background: var(--bg-secondary);
+            border: 1px solid var(--border-color);
+            border-radius: var(--radius);
+            font-size: 12px;
+            color: var(--text-secondary);
+            font-family: var(--font-mono);
+            flex-shrink: 0;
+        }
+
+        .video-bar-left {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .video-bar-right {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+
+        .badge {
+            display: inline-flex;
+            align-items: center;
+            gap: 4px;
+            padding: 2px 8px;
+            border-radius: 3px;
+            font-size: 11px;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.3px;
+        }
+
+        .badge-hls {
+            background: rgba(88, 166, 255, 0.15);
+            color: var(--accent-color);
+        }
+
+        /* ── Sidebar (Config Panel) ──────────────────────────── */
+        .sidebar {
+            display: flex;
+            flex-direction: column;
+            border-left: 1px solid var(--border-color);
+            background: var(--bg-secondary);
+            overflow-y: auto;
+        }
+
+        .sidebar-section {
+            padding: 14px 18px;
+            border-bottom: 1px solid var(--border-color);
+        }
+
+        .sidebar-section:last-child {
+            border-bottom: none;
+        }
+
+        .sidebar-title {
+            font-size: 11px;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.8px;
+            color: var(--text-secondary);
+            margin-bottom: 12px;
+        }
+
+        .field {
+            margin-bottom: 12px;
+        }
+
+        .field:last-child {
+            margin-bottom: 0;
+        }
+
+        .field label {
+            display: block;
+            font-size: 12px;
+            font-weight: 500;
+            color: var(--text-secondary);
+            margin-bottom: 4px;
+        }
+
+        .field input[type="text"],
+        .field input[type="number"] {
+            width: 100%;
+            padding: 7px 10px;
+            background: var(--bg-primary);
+            border: 1px solid var(--border-color);
+            border-radius: 4px;
+            color: var(--text-primary);
+            font-size: 13px;
+            font-family: var(--font-mono);
+            transition: border-color 0.2s, box-shadow 0.2s;
+        }
+
+        .field input:focus {
+            outline: none;
+            border-color: var(--accent-color);
+            box-shadow: 0 0 0 3px rgba(88, 166, 255, 0.12);
+        }
+
+        .field input::placeholder {
+            color: var(--text-secondary);
+            opacity: 0.5;
+        }
+
+        .field-hint {
+            font-size: 11px;
+            color: var(--text-secondary);
+            margin-top: 3px;
+            opacity: 0.7;
+        }
+
+        .btn {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            gap: 6px;
+            width: 100%;
+            padding: 9px 14px;
+            border: none;
+            border-radius: 4px;
+            font-size: 13px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: background-color 0.15s, transform 0.1s;
+            font-family: var(--font-body);
+        }
+
+        .btn:active {
+            transform: scale(0.98);
+        }
+
+        .btn-primary {
+            background: var(--accent-color);
+            color: var(--bg-primary);
+        }
+
+        .btn-primary:hover {
+            background: var(--accent-hover);
+        }
+
+        .btn-primary:active {
+            background: var(--accent-active);
+        }
+
+        .btn-danger {
+            background: rgba(248, 81, 73, 0.15);
+            color: var(--danger);
+            border: 1px solid rgba(248, 81, 73, 0.25);
+        }
+
+        .btn-danger:hover {
+            background: rgba(248, 81, 73, 0.25);
+        }
+
+        .btn-group {
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+            margin-top: 14px;
+        }
+
+        /* ── otslog stamp panel ──────────────────────────── */
+        .stamp-panel {
+            display: flex;
+            flex-direction: column;
+            gap: 0;
+            overflow-y: auto;
+            flex: 1;
+            min-height: 0;
+        }
+
+        .stamp-panel::-webkit-scrollbar { width: 5px; }
+        .stamp-panel::-webkit-scrollbar-track { background: transparent; }
+        .stamp-panel::-webkit-scrollbar-thumb { background: var(--border-color); border-radius: 3px; }
+        .stamp-panel::-webkit-scrollbar-thumb:hover { background: var(--text-secondary); }
+
+        .seg-group {
+            border: 1px solid var(--border-color);
+            border-radius: var(--radius);
+            margin-bottom: 8px;
+            overflow: hidden;
+        }
+
+        .seg-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 6px 10px;
+            background: var(--bg-primary);
+            cursor: pointer;
+            user-select: none;
+            gap: 8px;
+        }
+
+        .seg-header:hover {
+            background: rgba(88, 166, 255, 0.05);
+        }
+
+        .seg-header-left {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            font-family: var(--font-mono);
+            font-size: 11px;
+            font-weight: 600;
+            color: var(--accent-color);
+            min-width: 0;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+
+        .seg-chevron {
+            font-size: 9px;
+            color: var(--text-secondary);
+            transition: transform 0.15s;
+            flex-shrink: 0;
+        }
+
+        .seg-group.collapsed .seg-chevron { transform: rotate(-90deg); }
+        .seg-group.collapsed .seg-body { display: none; }
+
+        .seg-status-badges {
+            display: flex;
+            align-items: center;
+            gap: 4px;
+            flex-shrink: 0;
+        }
+
+        .seg-badge {
+            padding: 1px 6px;
+            border-radius: 3px;
+            font-size: 10px;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.3px;
+            font-family: var(--font-mono);
+        }
+
+        .seg-badge.started { background: rgba(88, 166, 255, 0.15); color: var(--accent-color); }
+        .seg-badge.done    { background: rgba(63, 185, 80, 0.15);  color: var(--success); }
+        .seg-badge.error   { background: rgba(248, 81, 73, 0.15);  color: var(--danger); }
+
+        .seg-count {
+            font-size: 10px;
+            color: var(--text-secondary);
+            font-family: var(--font-mono);
+            flex-shrink: 0;
+        }
+
+        .seg-body {
+            padding: 4px 0;
+            max-height: 200px;
+            overflow-y: auto;
+        }
+
+        .seg-body::-webkit-scrollbar { width: 4px; }
+        .seg-body::-webkit-scrollbar-track { background: transparent; }
+        .seg-body::-webkit-scrollbar-thumb { background: var(--border-color); border-radius: 3px; }
+        .seg-body::-webkit-scrollbar-thumb:hover { background: var(--text-secondary); }
+
+        .stamp-row {
+            display: flex;
+            align-items: baseline;
+            gap: 6px;
+            padding: 3px 10px;
+            font-family: var(--font-mono);
+            font-size: 11px;
+            line-height: 1.5;
+        }
+
+        .stamp-row:hover {
+            background: rgba(88, 166, 255, 0.04);
+        }
+
+        .stamp-icon {
+            color: var(--success);
+            flex-shrink: 0;
+            font-size: 10px;
+        }
+
+        .stamp-time {
+            color: var(--text-primary);
+            flex-shrink: 0;
+        }
+
+        .stamp-offset {
+            color: var(--text-secondary);
+            flex-shrink: 0;
+        }
+
+        .stamp-mid {
+            color: var(--accent-color);
+            opacity: 0.7;
+            font-size: 10px;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+            min-width: 0;
+        }
+
+        .raw-line {
+            padding: 2px 10px;
+            font-family: var(--font-mono);
+            font-size: 10px;
+            color: var(--text-secondary);
+            opacity: 0.6;
+            white-space: pre-wrap;
+            word-break: break-all;
+            line-height: 1.5;
+        }
+
+        .raw-line.error { color: var(--danger); opacity: 1; }
+        .raw-line.info  { color: var(--accent-color); opacity: 0.8; }
+
+        .raw-section {
+        }
+
+        .raw-toggle {
+            display: flex;
+            align-items: center;
+            gap: 4px;
+            padding: 4px 10px;
+            font-family: var(--font-mono);
+            font-size: 10px;
+            color: var(--text-secondary);
+            cursor: pointer;
+            user-select: none;
+            opacity: 0.7;
+        }
+
+        .raw-toggle:hover { opacity: 1; color: var(--accent-color); }
+
+        .raw-lines { display: none; }
+        .raw-section.expanded .raw-lines { display: block; }
+
+        /* ── Tabs ────────────────────────────────────────── */
+        .global-log {
+            padding: 4px 0 6px;
+            border-bottom: 1px solid var(--border-color);
+            margin-bottom: 0;
+            flex-shrink: 0;
+        }
+        .global-log .raw-line {
+            padding: 2px 0;
+        }
+        .tab-bar {
+            display: flex;
+            border-bottom: 1px solid var(--border-color);
+            flex-shrink: 0;
+            margin-bottom: 0;
+        }
+
+        .tab-btn {
+            flex: 1;
+            padding: 6px 0;
+            background: none;
+            border: none;
+            border-bottom: 2px solid transparent;
+            margin-bottom: -1px;
+            font-family: var(--font-mono);
+            font-size: 11px;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            color: var(--text-secondary);
+            cursor: pointer;
+            transition: color 0.15s, border-color 0.15s;
+        }
+
+        .tab-btn:hover { color: var(--text-primary); }
+
+        .tab-btn.active {
+            color: var(--accent-color);
+            border-bottom-color: var(--accent-color);
+        }
+
+        .tab-pane { display: none; flex: 1; min-height: 0; flex-direction: column; }
+        .tab-pane.active { display: flex; }
+
+        /* ── Scrollbar (sidebar) ─────────────────────────── */
+        .sidebar::-webkit-scrollbar { width: 5px; }
+        .sidebar::-webkit-scrollbar-track { background: transparent; }
+        .sidebar::-webkit-scrollbar-thumb { background: var(--border-color); border-radius: 3px; }
+        .sidebar::-webkit-scrollbar-thumb:hover { background: var(--text-secondary); }
+        /* ── Responsive ──────────────────────────────────────── */
+        @media (max-width: 860px) {
+            .content {
+                grid-template-columns: 1fr;
+                grid-template-rows: 1fr auto;
+            }
+
+            .sidebar {
+                border-left: none;
+                border-top: 1px solid var(--border-color);
+                max-height: 50vh;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="shell">
+        <!-- Top bar -->
+        <header class="topbar">
+            <div class="topbar-brand">
+                <div class="topbar-logo">ots</div>
+                <h1>otslog</h1>
+            </div>
+            <div class="topbar-status">
+                <span class="status-dot" id="wsDot"></span>
+                <span id="wsStatus">ws: connecting</span>
+                <span style="margin: 0 8px; color: var(--border-color);">|</span>
+                <span class="status-dot" id="statusDot"></span>
+                <span id="statusText">idle</span>
+            </div>
+        </header>
+
+        <!-- Main content -->
+        <div class="content">
+            <!-- Video player -->
+            <div class="video-panel">
+                <div class="video-wrapper">
+                    <video id="videoPlayer" autoplay muted playsinline></video>
+                    <div class="video-overlay" id="videoOverlay">
+                        <div class="video-overlay-icon">
+                            <svg viewBox="0 0 24 24">
+                                <polygon points="5,3 19,12 5,21" />
+                            </svg>
+                        </div>
+                        <span class="video-overlay-text">waiting for stream…</span>
+                    </div>
+                </div>
+                <div class="video-bar">
+                    <div class="video-bar-left">
+                        <span class="badge badge-hls">HLS</span>
+                        <span id="streamUrl">/stream/live.m3u8</span>
+                    </div>
+                    <div class="video-bar-right">
+                        <span id="videoResolution">—</span>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Sidebar config -->
+            <aside class="sidebar">
+                <div class="sidebar-section">
+                    <div class="sidebar-title">Stream</div>
+                    <div class="field">
+                        <label for="hlsUrl">HLS Playlist URL</label>
+                        <input type="text" id="hlsUrl" value="/stream/live.m3u8" placeholder="/stream/live.m3u8">
+                    </div>
+                    <div class="btn-group">
+                        <button class="btn btn-primary" id="btnStartStream">▶ Load Stream</button>
+                        <button class="btn btn-danger" id="btnStopStream">■ Stop</button>
+                    </div>
+                </div>
+
+                <div class="sidebar-section" style="flex: 1; display: flex; flex-direction: column; min-height: 0;">
+                    <div class="sidebar-title" style="flex-shrink:0;">otslog output</div>
+                    <div id="globalLog" class="global-log"></div>
+                    <div class="tab-bar">
+                        <button class="tab-btn active" id="tabBtnActive">Active</button>
+                        <button class="tab-btn" id="tabBtnHistory">History</button>
+                    </div>
+                    <div class="tab-pane active stamp-panel" id="paneActive"></div>
+                    <div class="tab-pane stamp-panel" id="paneHistory"></div>
+                </div>
+            </aside>
+        </div>
+    </div>
+
+    <script src="/vendor/hls.min.js"></script>
+    <script>
+        (function () {
+            "use strict";
+
+            // ── DOM refs ──────────────────────────────────────────
+            var video       = document.getElementById("videoPlayer");
+            var overlay     = document.getElementById("videoOverlay");
+            var statusDot   = document.getElementById("statusDot");
+            var statusText  = document.getElementById("statusText");
+            var wsDot       = document.getElementById("wsDot");
+            var wsStatusEl  = document.getElementById("wsStatus");
+            var streamUrlEl = document.getElementById("streamUrl");
+            var resEl       = document.getElementById("videoResolution");
+            var hlsUrlInput = document.getElementById("hlsUrl");
+            var btnStart    = document.getElementById("btnStartStream");
+            var btnStop     = document.getElementById("btnStopStream");
+
+            var hls              = null;
+            var stampWs          = null;
+            var wsReconnectTimer = null;
+            var segments         = {};
+            var paneActive  = document.getElementById("paneActive");
+            var paneHistory = document.getElementById("paneHistory");
+            var globalLog   = document.getElementById("globalLog");
+            var tabBtnActive  = document.getElementById("tabBtnActive");
+            var tabBtnHistory = document.getElementById("tabBtnHistory");
+
+            tabBtnActive.addEventListener("click", function () {
+                tabBtnActive.classList.add("active");
+                tabBtnHistory.classList.remove("active");
+                paneActive.classList.add("active");
+                paneHistory.classList.remove("active");
+            });
+            tabBtnHistory.addEventListener("click", function () {
+                tabBtnHistory.classList.add("active");
+                tabBtnActive.classList.remove("active");
+                paneHistory.classList.add("active");
+                paneActive.classList.remove("active");
+            });
+            function getOrCreateSegment(name) {
+                if (segments[name]) return segments[name];
+
+                var group = document.createElement("div");
+                group.className = "seg-group";
+
+                var header = document.createElement("div");
+                header.className = "seg-header";
+
+                var left = document.createElement("div");
+                left.className = "seg-header-left";
+
+                var chevron = document.createElement("span");
+                chevron.className = "seg-chevron";
+                chevron.textContent = "▾";
+
+                var nameSpan = document.createElement("span");
+                nameSpan.textContent = name;
+                left.appendChild(chevron);
+                left.appendChild(nameSpan);
+
+                var right = document.createElement("div");
+                right.className = "seg-status-badges";
+
+                var countEl = document.createElement("span");
+                countEl.className = "seg-count";
+                countEl.textContent = "0 stamps";
+
+                right.appendChild(countEl);
+
+                header.appendChild(left);
+                header.appendChild(right);
+
+                var body = document.createElement("div");
+                body.className = "seg-body";
+
+                // Raw section at bottom of body
+                var rawSection = document.createElement("div");
+                rawSection.className = "raw-section";
+
+                var rawToggle = document.createElement("div");
+                rawToggle.className = "raw-toggle";
+                rawToggle.innerHTML = "▸ raw output";
+
+                var rawLines = document.createElement("div");
+                rawLines.className = "raw-lines";
+
+                rawToggle.addEventListener("click", function (e) {
+                    e.stopPropagation();
+                    rawSection.classList.toggle("expanded");
+                    rawToggle.innerHTML = rawSection.classList.contains("expanded")
+                        ? "▾ raw output"
+                        : "▸ raw output";
+                });
+
+                rawSection.appendChild(rawToggle);
+                rawSection.appendChild(rawLines);
+                body.appendChild(rawSection);
+
+                group.appendChild(header);
+                group.appendChild(body);
+
+                // Collapse/expand on header click
+                header.addEventListener("click", function () {
+                    group.classList.toggle("collapsed");
+                });
+
+                paneActive.appendChild(group);
+
+                segments[name] = {
+                    el: group,
+                    bodyEl: body,
+                    countEl: countEl,
+                    badgesEl: right,
+                    rawSection: rawSection,
+                    rawLines: rawLines,
+                    count: 0
+                };
+                return segments[name];
+            }
+
+            function addStatus(seg, statusWord) {
+                var existing = seg.badgesEl.querySelector(".seg-badge." + statusWord);
+                if (existing) return;
+                var badge = document.createElement("span");
+                badge.className = "seg-badge " + statusWord;
+                badge.textContent = statusWord;
+                seg.badgesEl.insertBefore(badge, seg.countEl);
+
+                if (statusWord === "done" || statusWord === "error") {
+                    // Move to history pane, collapsed
+                    seg.el.classList.add("collapsed");
+                    paneHistory.insertBefore(seg.el, paneHistory.firstChild); // newest at top
+                } else if (statusWord === "started") {
+                    // Ensure it's in active pane, expanded
+                    paneActive.appendChild(seg.el);
+                    seg.el.classList.remove("collapsed");
+                    // Collapse any other leftover cards in active pane
+                    Object.keys(segments).forEach(function (k) {
+                        if (segments[k] !== seg && segments[k].el.parentNode === paneActive) {
+                            segments[k].el.classList.add("collapsed");
+                        }
+                    });
+                }
+            }
+
+            function addStamp(seg, offset, unixTime, midstate) {
+                seg.count++;
+                seg.countEl.textContent = seg.count + (seg.count === 1 ? " stamp" : " stamps");
+
+                var d = new Date(unixTime * 1000);
+                var hh = String(d.getHours()).padStart(2, "0");
+                var mm = String(d.getMinutes()).padStart(2, "0");
+                var ss = String(d.getSeconds()).padStart(2, "0");
+                var timeStr = hh + ":" + mm + ":" + ss;
+                var midShort = midstate ? midstate.slice(0, 8) + "…" : ""
+
+                var row = document.createElement("div");
+                row.className = "stamp-row";
+                row.innerHTML =
+                    "<span class='stamp-icon'>✓</span>" +
+                    "<span class='stamp-time'>" + timeStr + "</span>" +
+                    "<span class='stamp-offset'>+" + offset + "</span>" +
+                    "<span class='stamp-mid'>" + midShort + "</span>";
+
+                // Insert before raw section
+                seg.bodyEl.insertBefore(row, seg.rawSection);
+                seg.bodyEl.scrollTop = seg.bodyEl.scrollHeight;
+            }
+
+            function addRaw(seg, text, cls) {
+                var line = document.createElement("div");
+                line.className = "raw-line" + (cls ? " " + cls : "");
+                line.textContent = text;
+                seg.rawLines.appendChild(line);
+            }
+
+            function log(text, cls) {
+                // Parse segment prefix: "[output_000.mp4] ..."",
+                var segMatch = text.match(/^\[([^\]]+\.mp4)\]\s*(.*)/);
+                if (segMatch) {
+                    var segName = segMatch[1];
+                    var rest = segMatch[2];
+                    var seg = getOrCreateSegment(segName);
+
+                    // Try to parse Stamped line
+                    var stampMatch = rest.match(/^Stamped\s+offset=(\d+)\s+time=(\d+)\s+midstate=([0-9a-f]+)/i);
+                    if (stampMatch) {
+                        addStamp(seg, stampMatch[1], parseInt(stampMatch[2], 10), stampMatch[3]);
+                        return;
+                    }
+
+                    // Status words
+                    var statusWord = rest.trim().toLowerCase();
+                    if (statusWord === "started" || statusWord === "done" || statusWord === "error") {
+                        addStatus(seg, statusWord);
+                        addRaw(seg, rest, statusWord === "error" ? "error" : "info");
+                        return;
+                    }
+
+                    // Everything else → raw
+                    addRaw(seg, rest);
+                    return;
+                }
+
+                // No segment prefix — global raw line (WS status etc)
+                var line = document.createElement("div");
+                line.className = "raw-line" + (cls ? " " + cls : "");
+                line.textContent = text;
+                globalLog.appendChild(line);
+            }
+
+            // ── Status ────────────────────────────────────────
+            function setStatus(state, text) {
+                statusDot.className = "status-dot" + (state === "live" ? " live" : "");
+                statusText.textContent = text || state;
+            }
+
+            // ── HLS Player ────────────────────────────────────
+            function destroyPlayer() {
+                if (hls) {
+                    hls.destroy();
+                    hls = null;
+                }
+                video.removeAttribute("src");
+                video.load();
+                overlay.classList.remove("hidden");
+                setStatus("idle", "idle");
+            }
+
+            function initPlayer(url) {
+                destroyPlayer();
+                streamUrlEl.textContent = url;
+                log("loading " + url + " …", "info");
+
+                if (typeof Hls !== "undefined" && Hls.isSupported()) {
+                    hls = new Hls({
+                        enableWorker: true,
+                        lowLatencyMode: false,
+                        liveSyncDurationCount: 2,
+                        liveMaxLatencyDurationCount: 5,
+                        manifestLoadingMaxRetry: 10,
+                        manifestLoadingRetryDelay: 1000,
+                    });
+
+                    hls.loadSource(url);
+                    hls.attachMedia(video);
+
+                    hls.on(Hls.Events.MANIFEST_PARSED, function () {
+                        overlay.classList.add("hidden");
+                        setStatus("live", "live");
+                        log("manifest parsed — playing", "success");
+                        video.play().catch(function () {});
+                    });
+
+                    hls.on(Hls.Events.ERROR, function (_event, data) {
+                        if (data.fatal) {
+                            log("fatal: " + data.type + " — " + data.details, "error");
+                            if (data.type === Hls.ErrorTypes.NETWORK_ERROR) {
+                                log("attempting recovery…", "info");
+                                hls.startLoad();
+                            } else if (data.type === Hls.ErrorTypes.MEDIA_ERROR) {
+                                log("attempting media recovery…", "info");
+                                hls.recoverMediaError();
+                            } else {
+                                destroyPlayer();
+                            }
+                        }
+                    });
+
+                    hls.on(Hls.Events.LEVEL_SWITCHED, function (_event, data) {
+                        var level = hls.levels[data.level];
+                        if (level) {
+                            resEl.textContent = level.width + "×" + level.height;
+                        }
+                    });
+                } else if (video.canPlayType("application/vnd.apple.mpegurl")) {
+                    // Safari native HLS
+                    video.src = url;
+                    video.addEventListener("loadedmetadata", function () {
+                        overlay.classList.add("hidden");
+                        setStatus("live", "live");
+                        log("native HLS — playing", "success");
+                        video.play().catch(function () {});
+                    });
+                } else {
+                    log("HLS not supported in this browser", "error");
+                }
+            }
+
+            // ── Resolution tracking ──────────────────────────
+            video.addEventListener("resize", function () {
+                if (video.videoWidth && video.videoHeight) {
+                    resEl.textContent = video.videoWidth + "×" + video.videoHeight;
+                }
+            });
+
+            // ── Button handlers ───────────────────────────────
+            btnStart.addEventListener("click", function () {
+                var url = hlsUrlInput.value.trim();
+                if (!url) {
+                    log("no HLS URL specified", "error");
+                    return;
+                }
+                initPlayer(url);
+            });
+
+            btnStop.addEventListener("click", function () {
+                destroyPlayer();
+                log("stream stopped", "info");
+            });
+
+            // ── Cleanup on unload ─────────────────────────────
+            window.addEventListener("beforeunload", function () {
+                if (hls) { hls.destroy(); }
+                if (stampWs) { stampWs.close(); }
+            });
+
+            // ── WebSocket: otslog stamp output ───────────────
+            function setWsStatus(state, text) {
+                wsDot.className = "status-dot" + (state === "live" ? " live" : "");
+                wsStatusEl.textContent = text || ("ws: " + state);
+            }
+
+            function connectStampWs() {
+                if (wsReconnectTimer) {
+                    clearTimeout(wsReconnectTimer);
+                    wsReconnectTimer = null;
+                }
+
+                var proto = location.protocol === "https:" ? "wss:" : "ws:";
+                var url = proto + "//" + location.host + "/ws/stamp";
+                setWsStatus("idle", "ws: connecting");
+
+                stampWs = new WebSocket(url);
+
+                stampWs.onopen = function () {
+                    setWsStatus("live", "ws: connected");
+                };
+
+                stampWs.onmessage = function (event) {
+                    try {
+                        var msg = JSON.parse(event.data);
+                        if (msg.line) {
+                            log(msg.line);
+                        } else if (msg.status) {
+                            // msg.status value is already "[segment.mp4] done" from server
+                            // or a global status like "stamping: ..." — pass directly, no extra prefix
+                            log(msg.status, "info");
+                            // Update WS indicator based on whether any segment is being stamped
+                            if (/started|running/.test(msg.status)) {
+                                setWsStatus("live", "ws: stamping");
+                            } else if (/exited|stopped/.test(msg.status) && !msg.status.includes(".mp4")) {
+                                setWsStatus("idle", "ws: " + msg.status);
+                            }
+                        } else if (msg.error) {
+                            log("[stamp] error: " + msg.error, "error");
+                        }
+                    } catch (e) {
+                        log(event.data);
+                    }
+                };
+
+                stampWs.onclose = function () {
+                    setWsStatus("idle", "ws: disconnected");
+                    stampWs = null;
+                    // Auto-reconnect after 3s
+                    wsReconnectTimer = setTimeout(connectStampWs, 3000);
+                };
+
+                stampWs.onerror = function () {
+                    log("[ws] connection error", "error");
+                };
+            }
+
+            // ── Auto-start everything ─────────────────────────
+            initPlayer(hlsUrlInput.value.trim());
+            connectStampWs();
+        })();
+    </script>
+
+</body>
+</html>

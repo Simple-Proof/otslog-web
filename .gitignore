@@ -32,3 +32,24 @@ report.[0-9]_.[0-9]_.[0-9]_.[0-9]_.json
 
 # Finder (MacOS) folder config
 .DS_Store
+
+# runtime artifacts
+hls/
+segments/
+output.mp4
+output.mp4.*
+*.otslog
+*.ots
+
+# deployment
+otslog
+infra/otslog-web.pem
+infra/.terraform/
+infra/.terraform.lock.hcl
+infra/terraform.tfstate
+infra/terraform.tfstate.backup
+hls/
+output.mp4
+output.mp4.*
+*.otslog
+*.ots

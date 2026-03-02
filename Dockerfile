@@ -30,8 +30,9 @@ ENV SEGMENT_DIR=/data/segments
 ENV HLS_DIR=/data/hls
 
 CMD ["bun", "run", "src/index.ts", \
-     "--otslog-bin", "/usr/local/bin/otslog", \
+     "--otslog-bin", "otslog", \
+     "--clean", \
      "--segment-dir", "/data/segments", \
      "--hls-dir", "/data/hls", \
-     "--segment-time", "600", \
+     "--segment-time", "300", \
      "--port", "3777"]

@@ -194,31 +194,6 @@
             font-family: var(--font-mono);
         }
 
-        .video-bar {
-            display: flex;
-            align-items: center;
-            justify-content: space-between;
-            padding: 8px 12px;
-            background: var(--bg-secondary);
-            border: 1px solid var(--border-color);
-            border-radius: var(--radius);
-            font-size: 12px;
-            color: var(--text-secondary);
-            font-family: var(--font-mono);
-            flex-shrink: 0;
-        }
-
-        .video-bar-left {
-            display: flex;
-            align-items: center;
-            gap: 8px;
-        }
-
-        .video-bar-right {
-            display: flex;
-            align-items: center;
-            gap: 12px;
-        }
 
         .badge {
             display: inline-flex;
@@ -232,10 +207,6 @@
             letter-spacing: 0.3px;
         }
 
-        .badge-hls {
-            background: rgba(88, 166, 255, 0.15);
-            color: var(--accent-color);
-        }
 
         /* ── Sidebar (Config Panel) ──────────────────────────── */
         .sidebar {
@@ -632,25 +603,12 @@
                         <span class="video-overlay-text">waiting for stream…</span>
                     </div>
                 </div>
-                <div class="video-bar">
-                    <div class="video-bar-left">
-                        <span class="badge badge-hls">HLS</span>
-                        <span id="streamUrl">/stream/live.m3u8</span>
-                    </div>
-                    <div class="video-bar-right">
-                        <span id="videoResolution">—</span>
-                    </div>
-                </div>
             </div>
 
             <!-- Sidebar config -->
             <aside class="sidebar">
                 <div class="sidebar-section">
                     <div class="sidebar-title">Stream</div>
-                    <div class="field">
-                        <label for="hlsUrl">HLS Playlist URL</label>
-                        <input type="text" id="hlsUrl" value="/stream/live.m3u8" placeholder="/stream/live.m3u8">
-                    </div>
                     <div class="btn-group">
                         <button class="btn btn-primary" id="btnStartStream">▶ Load Stream</button>
                         <button class="btn btn-danger" id="btnStopStream">■ Stop</button>
@@ -683,9 +641,6 @@
             var statusText  = document.getElementById("statusText");
             var wsDot       = document.getElementById("wsDot");
             var wsStatusEl  = document.getElementById("wsStatus");
-            var streamUrlEl = document.getElementById("streamUrl");
-            var resEl       = document.getElementById("videoResolution");
-            var hlsUrlInput = document.getElementById("hlsUrl");
             var btnStart    = document.getElementById("btnStartStream");
             var btnStop     = document.getElementById("btnStopStream");
 
@@ -903,7 +858,6 @@
 
             function initPlayer(url) {
                 destroyPlayer();
-                streamUrlEl.textContent = url;
                 log("loading " + url + " …", "info");
 
                 if (typeof Hls !== "undefined" && Hls.isSupported()) {
@@ -941,12 +895,6 @@
                         }
                     });
 
-                    hls.on(Hls.Events.LEVEL_SWITCHED, function (_event, data) {
-                        var level = hls.levels[data.level];
-                        if (level) {
-                            resEl.textContent = level.width + "×" + level.height;
-                        }
-                    });
                 } else if (video.canPlayType("application/vnd.apple.mpegurl")) {
                     // Safari native HLS
                     video.src = url;
@@ -961,21 +909,10 @@
                 }
             }
 
-            // ── Resolution tracking ──────────────────────────
-            video.addEventListener("resize", function () {
-                if (video.videoWidth && video.videoHeight) {
-                    resEl.textContent = video.videoWidth + "×" + video.videoHeight;
-                }
-            });
 
             // ── Button handlers ───────────────────────────────
             btnStart.addEventListener("click", function () {
-                var url = hlsUrlInput.value.trim();
-                if (!url) {
-                    log("no HLS URL specified", "error");
-                    return;
-                }
-                initPlayer(url);
+                initPlayer("/stream/live.m3u8");
             });
 
             btnStop.addEventListener("click", function () {
@@ -1047,7 +984,7 @@
             }
 
             // ── Auto-start everything ─────────────────────────
-            initPlayer(hlsUrlInput.value.trim());
+            initPlayer("/stream/live.m3u8");
             connectStampWs();
         })();
     </script>

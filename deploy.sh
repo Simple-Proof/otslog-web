@@ -27,7 +27,6 @@ if [[ ! -f "$SSH_KEY" ]]; then
   chmod 600 "$SSH_KEY"
   # Public key used by Terraform
   log "Key generated: $SSH_KEY  (public: ${SSH_KEY%.pem}.pub → infra/otslog-web.pub)"
-  cp "infra/otslog-web.pub" "infra/otslog-web.pub"
 fi
 
 # ── Step 1: Terraform apply ───────────────────────────────────────────────────

@@ -334,10 +334,15 @@ process.on("SIGTERM", () => shutdown("SIGTERM"));
 // ---------------------------------------------------------------------------
 
 async function cleanArtifacts() {
-  const { rm } = await import("node:fs/promises");
+  const { rm, readdir } = await import("node:fs/promises");
+  const { join } = await import("node:path");
   console.log("[clean] removing segments/, hls/ and otslog artifacts...");
-  await rm(segmentDir, { recursive: true, force: true });
-  await rm(hlsDir, { recursive: true, force: true });
+  for (const dir of [segmentDir, hlsDir]) {
+    try {
+      const entries = await readdir(dir);
+      await Promise.all(entries.map(e => rm(join(dir, e), { recursive: true, force: true })));
+    } catch {}
+  }
   console.log("[clean] done");
 }
 

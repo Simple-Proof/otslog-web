@@ -4,7 +4,8 @@ import type { WSContext } from "hono/ws";
 import { parseArgs } from "node:util";
 import { resolve, dirname, basename, join } from "node:path";
 import { list, extract } from "./otslog.ts";
-import { startFfmpeg, killFfmpegProcess, isFfmpegRunning } from "./ffmpeg.ts";
+import { startFfmpeg, isFfmpegRunning } from "./ffmpeg.ts";
+import type { FfmpegProcess } from "./ffmpeg.ts";
 import { SegmentWatcher } from "./segment-watcher.ts";
 
 // ---------------------------------------------------------------------------
@@ -77,6 +78,7 @@ function broadcastStatus(segment: string, status: string) {
 // ---------------------------------------------------------------------------
 
 let watcher: SegmentWatcher | null = null;
+let ffmpegProcess: FfmpegProcess | null = null;
 
 // ---------------------------------------------------------------------------
 // Hono app + WebSocket
@@ -321,7 +323,7 @@ app.get(
 
 function shutdown(signal: string) {
   console.log(`${signal} received, shutting down gracefully...`);
-  killFfmpegProcess();
+  ffmpegProcess?.stop();
   watcher?.stop();
   process.exit(0);
 }
@@ -361,7 +363,7 @@ async function autoStartFfmpeg() {
   }
 
   try {
-    const { lines } = await startFfmpeg({
+    ffmpegProcess = await startFfmpeg({
       rtspUrl,
       segmentDir,
       segmentTime,
@@ -371,15 +373,15 @@ async function autoStartFfmpeg() {
     });
 
     (async () => {
-      for await (const line of lines) {
+      for await (const line of ffmpegProcess!.lines) {
         if (line.includes("Error") || line.includes("error") || line.includes("Output #")) {
           console.log(`[ffmpeg] ${line}`);
         }
       }
-      console.log("[ffmpeg] process exited");
+      console.log("[ffmpeg] rotation stopped");
     })();
 
-    console.log("[boot] ffmpeg started");
+    console.log(`[boot] ffmpeg started (segment-time=${segmentTime}s)`);
   } catch (err) {
     console.error("[boot] failed to start ffmpeg:", err);
   }

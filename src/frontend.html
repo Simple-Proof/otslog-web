@@ -702,6 +702,28 @@
             font-size: 11px;
             color: rgba(255, 255, 255, 0.86);
             margin-left: auto;
+            gap: 10px;
+        }
+
+        .camera-select {
+            min-width: 110px;
+            height: 28px;
+            border: 1px solid rgba(255, 255, 255, 0.35);
+            border-radius: 8px;
+            padding: 0 8px;
+            background: rgba(255, 255, 255, 0.12);
+            color: #fff;
+            font-size: 12px;
+            font-family: var(--font-medium);
+        }
+
+        .camera-select:focus {
+            outline: none;
+            border-color: rgba(255, 255, 255, 0.75);
+        }
+
+        .camera-select option {
+            color: #111;
         }
 
         .status-dot {
@@ -1035,6 +1057,7 @@
                 <h1>otslog</h1>
             </div>
             <div class="topbar-status">
+                <select id="cameraSelect" class="camera-select"></select>
                 <span class="status-dot" id="wsDot"></span>
                 <span id="wsStatus">ws: connecting</span>
                 <span style="margin: 0 8px; color: var(--border-color);">|</span>
@@ -1098,12 +1121,15 @@
             var statusText  = document.getElementById("statusText");
             var wsDot       = document.getElementById("wsDot");
             var wsStatusEl  = document.getElementById("wsStatus");
-            var streamUrl   = "https://stream.simpleproof.xyz/stream/index.m3u8";
+            var cameraSelect = document.getElementById("cameraSelect");
 
             var hls              = null;
             var stampWs          = null;
             var wsReconnectTimer = null;
             var segments         = {};
+            var cameras          = [];
+            var activeCameraId   = null;
+            var streamUrl        = "";
             var paneActive  = document.getElementById("paneActive");
             var paneHistory = document.getElementById("paneHistory");
             var globalLog   = document.getElementById("globalLog");
@@ -1128,6 +1154,57 @@
                 paneHistory.classList.add("active");
                 paneActive.classList.remove("active");
             });
+
+            function cameraIdFromSegment(name) {
+                var match = name.match(/^([a-zA-Z0-9_-]+)_output_/);
+                return match && match[1] ? match[1] : "default";
+            }
+
+            function applyCameraFilter() {
+                Object.keys(segments).forEach(function (k) {
+                    var seg = segments[k];
+                    var camId = cameraIdFromSegment(seg.name);
+                    seg.el.style.display = (!activeCameraId || camId === activeCameraId) ? "" : "none";
+                });
+            }
+
+            cameraSelect.addEventListener("change", function () {
+                activeCameraId = cameraSelect.value;
+                var selected = cameras.find(function (cam) { return cam.id === activeCameraId; });
+                if (selected) {
+                    streamUrl = selected.hlsUrl;
+                    initPlayer(streamUrl);
+                }
+                applyCameraFilter();
+            });
+
+            function loadCameraConfig() {
+                return fetch("/api/cameras")
+                    .then(function (response) {
+                        if (!response.ok) throw new Error("camera config HTTP " + response.status);
+                        return response.json();
+                    })
+                    .then(function (data) {
+                        cameras = (data && data.cameras) ? data.cameras : [];
+                        if (!cameras.length) {
+                            throw new Error("no cameras configured");
+                        }
+
+                        cameraSelect.innerHTML = "";
+                        cameras.forEach(function (camera) {
+                            var option = document.createElement("option");
+                            option.value = camera.id;
+                            option.textContent = camera.name;
+                            cameraSelect.appendChild(option);
+                        });
+
+                        activeCameraId = cameras[0].id;
+                        cameraSelect.value = activeCameraId;
+                        streamUrl = cameras[0].hlsUrl;
+                        applyCameraFilter();
+                    });
+            }
+
             function getOrCreateSegment(name) {
                 if (segments[name]) return segments[name];
 
@@ -1213,6 +1290,7 @@
 
                 paneActive.appendChild(group);
                 segments[name] = segmentState;
+                applyCameraFilter();
                 return segmentState;
             }
 
@@ -1507,8 +1585,15 @@
             }
 
             // ── Auto-start everything ─────────────────────────
-            initPlayer(streamUrl);
-            connectStampWs();
+            loadCameraConfig()
+                .then(function () {
+                    initPlayer(streamUrl);
+                    connectStampWs();
+                })
+                .catch(function (error) {
+                    log("camera config error: " + (error && error.message ? error.message : String(error)), "error");
+                    connectStampWs();
+                });
         })();
     </script>
 

@@ -27,6 +27,7 @@ export interface FfmpegOpts {
   segmentPrefix?: string;
   /** Path to ffmpeg binary (default: "ffmpeg") */
   bin?: string;
+  instanceKey?: string;
 }
 
 export interface FfmpegProcess {
@@ -40,10 +41,10 @@ export interface FfmpegProcess {
 // Module-level process tracking
 // ---------------------------------------------------------------------------
 
-let activeFfmpegProc: Subprocess | null = null;
+const activeFfmpegProcs = new Map<string, Subprocess>();
 
 export function isFfmpegRunning(): boolean {
-  return activeFfmpegProc !== null;
+  return activeFfmpegProcs.size > 0;
 }
 
 // ---------------------------------------------------------------------------
@@ -75,10 +76,13 @@ function buildFfmpegArgs(opts: FfmpegOpts, segmentFile: string): string[] {
 const MIN_LIFETIME_MS = 5_000;
 
 export async function startFfmpeg(opts: FfmpegOpts): Promise<FfmpegProcess> {
+  const instanceKey = opts.instanceKey ?? `${opts.segmentDir}|${opts.segmentPrefix ?? "output_"}`;
+
   // Kill any previously running ffmpeg
-  if (activeFfmpegProc) {
-    activeFfmpegProc.kill();
-    activeFfmpegProc = null;
+  const previousProc = activeFfmpegProcs.get(instanceKey);
+  if (previousProc) {
+    previousProc.kill();
+    activeFfmpegProcs.delete(instanceKey);
   }
 
   await mkdir(opts.segmentDir, { recursive: true });
@@ -108,7 +112,7 @@ export async function startFfmpeg(opts: FfmpegOpts): Promise<FfmpegProcess> {
     });
 
     currentProc = proc;
-    activeFfmpegProc = proc;
+    activeFfmpegProcs.set(instanceKey, proc);
 
     // Schedule rotation kill
     if (segmentTime > 0) {
@@ -157,8 +161,8 @@ export async function startFfmpeg(opts: FfmpegOpts): Promise<FfmpegProcess> {
     }
 
     // Final cleanup
-    if (activeFfmpegProc === currentProc) {
-      activeFfmpegProc = null;
+    if (activeFfmpegProcs.get(instanceKey) === currentProc) {
+      activeFfmpegProcs.delete(instanceKey);
     }
   }
 
@@ -172,7 +176,7 @@ export async function startFfmpeg(opts: FfmpegOpts): Promise<FfmpegProcess> {
       currentProc.kill();
       currentProc = null;
     }
-    activeFfmpegProc = null;
+    activeFfmpegProcs.delete(instanceKey);
   }
 
   return { stop, lines: rotatingLines() };

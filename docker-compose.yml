@@ -6,7 +6,13 @@ services:
     ports:
       - "127.0.0.1:3777:3777"
     environment:
-      - RTSP_URL=${RTSP_URL}
+      - CAMERAS=${CAMERAS}
+      - CAM01_NAME=${CAM01_NAME}
+      - CAM01_HLS_URL=${CAM01_HLS_URL}
+      - CAM01_RTSP_URL=${CAM01_RTSP_URL}
+      - CAM02_NAME=${CAM02_NAME}
+      - CAM02_HLS_URL=${CAM02_HLS_URL}
+      - CAM02_RTSP_URL=${CAM02_RTSP_URL}
     volumes:
       - segments:/data/segments
     logging:

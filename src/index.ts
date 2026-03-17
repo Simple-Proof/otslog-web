@@ -43,6 +43,62 @@ const clean          = values.clean as boolean;
 // RTSP_URL from environment (keeps credentials out of process list / ps aux)
 const rtspUrl = process.env["RTSP_URL"];
 
+interface CameraConfig {
+  id: string;
+  name: string;
+  rtspUrl: string;
+  hlsUrl: string;
+  segmentPrefix: string;
+}
+
+function cameraEnvPrefix(cameraId: string): string {
+  return cameraId.replace(/[^a-zA-Z0-9]/g, "_").toUpperCase();
+}
+
+function parseCameraConfigs(): CameraConfig[] {
+  const camerasEnv = process.env["CAMERAS"];
+  if (camerasEnv) {
+    const ids = camerasEnv.split(",").map((s) => s.trim()).filter(Boolean);
+    const cameras: CameraConfig[] = [];
+
+    for (const id of ids) {
+      const key = cameraEnvPrefix(id);
+      const camRtsp = process.env[`${key}_RTSP_URL`];
+      const camHls = process.env[`${key}_HLS_URL`];
+      if (!camRtsp || !camHls) {
+        console.warn(`[boot] skipping camera '${id}': missing ${key}_RTSP_URL or ${key}_HLS_URL`);
+        continue;
+      }
+
+      cameras.push({
+        id,
+        name: process.env[`${key}_NAME`] ?? id.toUpperCase(),
+        rtspUrl: camRtsp,
+        hlsUrl: camHls,
+        segmentPrefix: `${id}_output_`,
+      });
+    }
+
+    if (cameras.length > 0) return cameras;
+  }
+
+  if (!rtspUrl) return [];
+  return [{
+    id: "default",
+    name: process.env["CAMERA_NAME"] ?? "Default",
+    rtspUrl,
+    hlsUrl: process.env["HLS_URL"] ?? "https://stream.simpleproof.xyz/stream/index.m3u8",
+    segmentPrefix,
+  }];
+}
+
+const cameras = parseCameraConfigs();
+const cameraById = new Map(cameras.map((c) => [c.id, c]));
+
+function findCameraBySegmentName(name: string): CameraConfig | undefined {
+  return cameras.find((c) => name.startsWith(c.segmentPrefix));
+}
+
 interface ZipEntry {
   name: string;
   data: Uint8Array;
@@ -53,7 +109,9 @@ const SEGMENT_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._-]*\.mp4$/;
 const MAX_ZIP_BYTES = 200 * 1024 * 1024;
 
 function isPrimarySegmentName(filename: string): boolean {
-  return !/\[\d+\]\.mp4$/i.test(filename);
+  if (/\[\d+\]\.mp4$/i.test(filename)) return false;
+  if (cameras.length === 0) return filename.startsWith(segmentPrefix);
+  return cameras.some((camera) => filename.startsWith(camera.segmentPrefix));
 }
 
 function extractOutputCandidates(srcPath: string, offset: number): { truncatedPath: string; otsPath: string }[] {
@@ -218,8 +276,12 @@ function broadcastStatus(segment: string, status: string) {
 // SegmentWatcher instance
 // ---------------------------------------------------------------------------
 
-let watcher: SegmentWatcher | null = null;
-let ffmpegProcess: FfmpegProcess | null = null;
+const watchers = new Map<string, SegmentWatcher>();
+const ffmpegProcesses = new Map<string, FfmpegProcess>();
+
+function allActiveSegments(): string[] {
+  return [...watchers.values()].flatMap((watcher) => watcher.activeSegments());
+}
 
 // ---------------------------------------------------------------------------
 // Hono app + WebSocket
@@ -304,9 +366,11 @@ app.get("/api/segments", async (c) => {
         .map(async (f) => {
           const fullPath = join(segmentDir, f);
           const s = await stat(fullPath).catch(() => null);
-          const active = watcher?.activeSegments().includes(f) ?? false;
+          const active = allActiveSegments().includes(f);
+          const cameraId = findCameraBySegmentName(f)?.id ?? "default";
           return {
             name: f,
+            cameraId,
             path: fullPath,
             size: s?.size ?? 0,
             mtime: s?.mtime.toISOString() ?? null,
@@ -386,7 +450,8 @@ app.post("/api/extract-zip", async (c) => {
   const segmentName = body.segment_name;
   const offset = Number(body.offset);
 
-  if (!segmentName.startsWith(segmentPrefix) || !SEGMENT_NAME_RE.test(segmentName)) {
+  const segmentCamera = findCameraBySegmentName(segmentName);
+  if (!segmentCamera || !SEGMENT_NAME_RE.test(segmentName)) {
     return c.json({ error: "Invalid segment_name" }, 400);
   }
   if (segmentName.includes("/") || segmentName.includes("\\") || segmentName.includes("..")) {
@@ -516,9 +581,25 @@ app.get("/api/download", async (c) => {
 app.get("/api/status", (c) => {
   return c.json({
     ffmpeg: isFfmpegRunning(),
-    stamping: watcher?.activeSegments() ?? [],
+    stamping: allActiveSegments(),
     clients: stampClients.size,
     segmentDir,
+    cameras: cameras.map((camera) => ({
+      id: camera.id,
+      name: camera.name,
+      hlsUrl: camera.hlsUrl,
+      segmentPrefix: camera.segmentPrefix,
+    })),
+  });
+});
+
+app.get("/api/cameras", (c) => {
+  return c.json({
+    cameras: cameras.map((camera) => ({
+      id: camera.id,
+      name: camera.name,
+      hlsUrl: camera.hlsUrl,
+    })),
   });
 });
 
@@ -534,7 +615,7 @@ app.get(
       console.log(`[ws/stamp] client connected (${stampClients.size} total)`);
 
       // Send active segments status
-      const active = watcher?.activeSegments() ?? [];
+      const active = allActiveSegments();
       ws.send(JSON.stringify({
         status: active.length > 0
           ? `stamping: ${active.join(", ")}`
@@ -551,7 +632,7 @@ app.get(
       try {
         const msg = JSON.parse(String(event.data));
         if (msg.action === "stop") {
-          watcher?.stop();
+          for (const watcher of watchers.values()) watcher.stop();
           for (const ws2 of stampClients) {
             ws2.send(JSON.stringify({ status: "stopped" }));
           }
@@ -574,8 +655,10 @@ app.get(
 
 function shutdown(signal: string) {
   console.log(`${signal} received, shutting down gracefully...`);
-  ffmpegProcess?.stop();
-  watcher?.stop();
+  for (const proc of ffmpegProcesses.values()) proc.stop();
+  ffmpegProcesses.clear();
+  for (const watcher of watchers.values()) watcher.stop();
+  watchers.clear();
   process.exit(0);
 }
 
@@ -608,32 +691,36 @@ async function autoStartFfmpeg() {
     console.log("[boot] ffmpeg auto-start disabled (--no-ffmpeg)");
     return;
   }
-  if (!rtspUrl) {
-    console.log("[boot] RTSP_URL not set — skipping ffmpeg.");
+  if (cameras.length === 0) {
+    console.log("[boot] no cameras configured — skipping ffmpeg.");
     return;
   }
 
-  try {
-    ffmpegProcess = await startFfmpeg({
-      rtspUrl,
-      segmentDir,
-      segmentTime,
-      segmentPrefix,
-      bin: ffmpegBin,
-    });
+  for (const camera of cameras) {
+    try {
+      const proc = await startFfmpeg({
+        rtspUrl: camera.rtspUrl,
+        segmentDir,
+        segmentTime,
+        segmentPrefix: camera.segmentPrefix,
+        bin: ffmpegBin,
+        instanceKey: camera.id,
+      });
+      ffmpegProcesses.set(camera.id, proc);
 
-    (async () => {
-      for await (const line of ffmpegProcess!.lines) {
-        if (line.includes("Error") || line.includes("error") || line.includes("Output #")) {
-          console.log(`[ffmpeg] ${line}`);
+      (async () => {
+        for await (const line of proc.lines) {
+          if (line.includes("Error") || line.includes("error") || line.includes("Output #")) {
+            console.log(`[ffmpeg:${camera.id}] ${line}`);
+          }
         }
-      }
-      console.log("[ffmpeg] rotation stopped");
-    })();
+        console.log(`[ffmpeg:${camera.id}] rotation stopped`);
+      })();
 
-    console.log(`[boot] ffmpeg started (segment-time=${segmentTime}s)`);
-  } catch (err) {
-    console.error("[boot] failed to start ffmpeg:", err);
+      console.log(`[boot] ffmpeg started for ${camera.id} (segment-time=${segmentTime}s)`);
+    } catch (err) {
+      console.error(`[boot] failed to start ffmpeg for ${camera.id}:`, err);
+    }
   }
 }
 
@@ -650,26 +737,33 @@ function autoStartWatcher() {
     console.log("[boot] --otslog-bin not set — skipping segment watcher.");
     return;
   }
+  if (cameras.length === 0) {
+    console.log("[boot] no cameras configured — skipping segment watcher.");
+    return;
+  }
 
-  watcher = new SegmentWatcher({
-    segmentDir,
-    segmentPrefix,
-    otslogBin,
-    followInterval,
-    idleTimeout,
-    onLine: (segment, line) => {
-      console.log(`[otslog:${basename(segment)}] ${line}`);
-      broadcastLine(segment, line);
-    },
-    onStatus: (segment, status, detail) => {
-      const msg = detail ? `${status}: ${detail}` : status;
-      console.log(`[otslog:${basename(segment)}] ${msg}`);
-      broadcastStatus(segment, msg);
-    },
-  });
+  for (const camera of cameras) {
+    const watcher = new SegmentWatcher({
+      segmentDir,
+      segmentPrefix: camera.segmentPrefix,
+      otslogBin,
+      followInterval,
+      idleTimeout,
+      onLine: (segment, line) => {
+        console.log(`[otslog:${camera.id}:${basename(segment)}] ${line}`);
+        broadcastLine(segment, line);
+      },
+      onStatus: (segment, status, detail) => {
+        const msg = detail ? `${status}: ${detail}` : status;
+        console.log(`[otslog:${camera.id}:${basename(segment)}] ${msg}`);
+        broadcastStatus(segment, msg);
+      },
+    });
 
-  watcher.start();
-  console.log(`[boot] segment watcher started (${segmentDir}/${segmentPrefix}*.mp4, follow=${followInterval}s, idle-timeout=${idleTimeout}s)`);
+    watcher.start();
+    watchers.set(camera.id, watcher);
+    console.log(`[boot] segment watcher started for ${camera.id} (${segmentDir}/${camera.segmentPrefix}*.mp4, follow=${followInterval}s, idle-timeout=${idleTimeout}s)`);
+  }
 }
 
 // ---------------------------------------------------------------------------

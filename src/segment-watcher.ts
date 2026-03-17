@@ -100,6 +100,10 @@ export class SegmentWatcher {
   // ---------------------------------------------------------------------------
 
   private isSegment(filename: string): boolean {
+    if (/\[\d+\]\.mp4$/i.test(filename)) {
+      return false;
+    }
+
     return (
       filename.startsWith(this.opts.segmentPrefix) &&
       filename.endsWith(".mp4")

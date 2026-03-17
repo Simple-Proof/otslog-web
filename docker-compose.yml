@@ -9,7 +9,6 @@ services:
       - RTSP_URL=${RTSP_URL}
     volumes:
       - segments:/data/segments
-      - hls:/data/hls
     logging:
       driver: "json-file"
       options:
@@ -32,6 +31,5 @@ services:
 
 volumes:
   segments:
-  hls:
   caddy_data:
   caddy_config:

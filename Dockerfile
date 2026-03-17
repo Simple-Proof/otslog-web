@@ -22,17 +22,15 @@ COPY src/ ./src/
 COPY tsconfig.json ./
 
 # Create runtime directories
-RUN mkdir -p /data/segments /data/hls
+RUN mkdir -p /data/segments
 
 EXPOSE 3777
 
 ENV SEGMENT_DIR=/data/segments
-ENV HLS_DIR=/data/hls
 
 CMD ["bun", "run", "src/index.ts", \
      "--otslog-bin", "otslog", \
      "--clean", \
      "--segment-dir", "/data/segments", \
-     "--hls-dir", "/data/hls", \
      "--segment-time", "300", \
      "--port", "3777"]

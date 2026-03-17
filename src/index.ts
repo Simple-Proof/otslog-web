@@ -2,7 +2,7 @@ import { Hono } from "hono";
 import { createBunWebSocket } from "hono/bun";
 import type { WSContext } from "hono/ws";
 import { parseArgs } from "node:util";
-import { resolve, dirname, basename, join } from "node:path";
+import { resolve, dirname, basename, join, extname } from "node:path";
 import { list, extract } from "./otslog.ts";
 import { startFfmpeg, isFfmpegRunning } from "./ffmpeg.ts";
 import type { FfmpegProcess } from "./ffmpeg.ts";
@@ -16,11 +16,10 @@ const { values } = parseArgs({
   options: {
     port: { type: "string", default: "3777" },
     "otslog-bin": { type: "string" },
-    "hls-dir": { type: "string", default: "./hls" },
     "segment-dir": { type: "string", default: "./segments" },
     "segment-time": { type: "string", default: "600" },   // 10 minutes
     "segment-prefix": { type: "string", default: "output_" },
-    "follow-interval": { type: "string", default: "5" },
+    "follow-interval": { type: "string", default: "1" },
     "idle-timeout": { type: "string", default: "40" },    // slightly more than one segment
     "ffmpeg-bin": { type: "string", default: "ffmpeg" },
     "no-ffmpeg": { type: "boolean", default: false },
@@ -31,11 +30,10 @@ const { values } = parseArgs({
 
 const port           = parseInt(values.port as string, 10) || 3777;
 const otslogBin      = values["otslog-bin"] as string | undefined;
-const hlsDir         = resolve(values["hls-dir"] as string);
 const segmentDir     = resolve(values["segment-dir"] as string);
 const segmentTime    = parseInt(values["segment-time"] as string, 10) || 600;
 const segmentPrefix  = values["segment-prefix"] as string;
-const followInterval = parseInt(values["follow-interval"] as string, 10) || 5;
+const followInterval = parseInt(values["follow-interval"] as string, 10) || 1;
 const idleTimeout    = parseInt(values["idle-timeout"] as string, 10) || 40;
 const ffmpegBin      = values["ffmpeg-bin"] as string;
 const noFfmpeg       = values["no-ffmpeg"] as boolean;
@@ -44,6 +42,149 @@ const clean          = values.clean as boolean;
 
 // RTSP_URL from environment (keeps credentials out of process list / ps aux)
 const rtspUrl = process.env["RTSP_URL"];
+
+interface ZipEntry {
+  name: string;
+  data: Uint8Array;
+}
+
+const textEncoder = new TextEncoder();
+const SEGMENT_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._-]*\.mp4$/;
+const MAX_ZIP_BYTES = 200 * 1024 * 1024;
+
+function isPrimarySegmentName(filename: string): boolean {
+  return !/\[\d+\]\.mp4$/i.test(filename);
+}
+
+function extractOutputCandidates(srcPath: string, offset: number): { truncatedPath: string; otsPath: string }[] {
+  const ext = extname(srcPath);
+  const stem = ext ? srcPath.slice(0, -ext.length) : srcPath;
+  const bracket = `${stem}[${offset}]${ext}`;
+  const legacy = `${srcPath}.${offset}`;
+  return [
+    { truncatedPath: bracket, otsPath: `${bracket}.ots` },
+    { truncatedPath: legacy, otsPath: `${legacy}.ots` },
+  ];
+}
+
+function buildCrc32Table(): Uint32Array {
+  const table = new Uint32Array(256);
+  for (let i = 0; i < 256; i++) {
+    let c = i;
+    for (let j = 0; j < 8; j++) {
+      c = (c & 1) ? (0xedb88320 ^ (c >>> 1)) : (c >>> 1);
+    }
+    table[i] = c >>> 0;
+  }
+  return table;
+}
+
+const crc32Table = buildCrc32Table();
+
+function crc32(data: Uint8Array): number {
+  let c = 0xffffffff;
+  for (const byte of data) {
+    c = crc32Table[(c ^ byte) & 0xff]! ^ (c >>> 8);
+  }
+  return (c ^ 0xffffffff) >>> 0;
+}
+
+function toDosDateTime(date: Date): { time: number; day: number } {
+  const year = Math.min(Math.max(date.getFullYear(), 1980), 2107);
+  const month = date.getMonth() + 1;
+  const day = date.getDate();
+  const hours = date.getHours();
+  const minutes = date.getMinutes();
+  const seconds = Math.floor(date.getSeconds() / 2);
+
+  const dosTime = (hours << 11) | (minutes << 5) | seconds;
+  const dosDay = ((year - 1980) << 9) | (month << 5) | day;
+
+  return { time: dosTime, day: dosDay };
+}
+
+function concatBytes(chunks: Uint8Array[], totalLength: number): Uint8Array {
+  const out = new Uint8Array(totalLength);
+  let offset = 0;
+  for (const chunk of chunks) {
+    out.set(chunk, offset);
+    offset += chunk.length;
+  }
+  return out;
+}
+
+function buildStoredZip(entries: ZipEntry[]): Uint8Array {
+  const now = new Date();
+  const { time: dosTime, day: dosDay } = toDosDateTime(now);
+
+  const localParts: Uint8Array[] = [];
+  const centralParts: Uint8Array[] = [];
+
+  let localOffset = 0;
+  let centralSize = 0;
+
+  for (const entry of entries) {
+    const nameBytes = textEncoder.encode(entry.name);
+    const crc = crc32(entry.data);
+    const size = entry.data.length;
+
+    const localHeader = new Uint8Array(30);
+    const lv = new DataView(localHeader.buffer);
+    lv.setUint32(0, 0x04034b50, true);
+    lv.setUint16(4, 20, true);
+    lv.setUint16(6, 0, true);
+    lv.setUint16(8, 0, true);
+    lv.setUint16(10, dosTime, true);
+    lv.setUint16(12, dosDay, true);
+    lv.setUint32(14, crc, true);
+    lv.setUint32(18, size, true);
+    lv.setUint32(22, size, true);
+    lv.setUint16(26, nameBytes.length, true);
+    lv.setUint16(28, 0, true);
+
+    localParts.push(localHeader, nameBytes, entry.data);
+
+    const centralHeader = new Uint8Array(46);
+    const cv = new DataView(centralHeader.buffer);
+    cv.setUint32(0, 0x02014b50, true);
+    cv.setUint16(4, 20, true);
+    cv.setUint16(6, 20, true);
+    cv.setUint16(8, 0, true);
+    cv.setUint16(10, 0, true);
+    cv.setUint16(12, dosTime, true);
+    cv.setUint16(14, dosDay, true);
+    cv.setUint32(16, crc, true);
+    cv.setUint32(20, size, true);
+    cv.setUint32(24, size, true);
+    cv.setUint16(28, nameBytes.length, true);
+    cv.setUint16(30, 0, true);
+    cv.setUint16(32, 0, true);
+    cv.setUint16(34, 0, true);
+    cv.setUint16(36, 0, true);
+    cv.setUint32(38, 0, true);
+    cv.setUint32(42, localOffset, true);
+
+    centralParts.push(centralHeader, nameBytes);
+    centralSize += centralHeader.length + nameBytes.length;
+
+    localOffset += localHeader.length + nameBytes.length + entry.data.length;
+  }
+
+  const endRecord = new Uint8Array(22);
+  const ev = new DataView(endRecord.buffer);
+  ev.setUint32(0, 0x06054b50, true);
+  ev.setUint16(4, 0, true);
+  ev.setUint16(6, 0, true);
+  ev.setUint16(8, entries.length, true);
+  ev.setUint16(10, entries.length, true);
+  ev.setUint32(12, centralSize, true);
+  ev.setUint32(16, localOffset, true);
+  ev.setUint16(20, 0, true);
+
+  const allParts = [...localParts, ...centralParts, endRecord];
+  const totalLength = localOffset + centralSize + endRecord.length;
+  return concatBytes(allParts, totalLength);
+}
 
 // ---------------------------------------------------------------------------
 // Stamp broadcast — lines from SegmentWatcher forwarded to all WS clients
@@ -107,36 +248,28 @@ app.get("/vendor/hls.min.js", async (c) => {
   });
 });
 
-// ---------------------------------------------------------------------------
-// HLS stream
-// ---------------------------------------------------------------------------
-
-app.get("/stream/*", async (c) => {
-  const requestPath = c.req.path.replace(/^\/stream\//, "");
-  if (requestPath.includes("..") || requestPath.startsWith("/")) {
+app.get("/assets/*", async (c) => {
+  const requestPath = c.req.path.replace(/^\/assets\//, "");
+  if (!requestPath || requestPath.includes("..") || requestPath.startsWith("/")) {
     return c.text("Forbidden", 403);
   }
 
-  const filePath = `${hlsDir}/${requestPath}`;
-  try {
-    const file = Bun.file(filePath);
-    if (!await file.exists()) return c.text("Not Found", 404);
+  const filePath = `./src/assets/${requestPath}`;
+  const file = Bun.file(filePath);
+  if (!await file.exists()) return c.text("Not Found", 404);
 
-    let contentType = "application/octet-stream";
-    if (requestPath.endsWith(".m3u8")) contentType = "application/vnd.apple.mpegurl";
-    else if (requestPath.endsWith(".ts")) contentType = "video/mp2t";
+  let contentType = "application/octet-stream";
+  if (requestPath.endsWith(".svg")) contentType = "image/svg+xml";
+  else if (requestPath.endsWith(".png")) contentType = "image/png";
+  else if (requestPath.endsWith(".jpg") || requestPath.endsWith(".jpeg")) contentType = "image/jpeg";
+  else if (requestPath.endsWith(".webp")) contentType = "image/webp";
 
-    const headers: Record<string, string> = {
+  return c.body(await file.arrayBuffer(), {
+    headers: {
       "Content-Type": contentType,
-      "Access-Control-Allow-Origin": "*",
-    };
-    if (requestPath.endsWith(".m3u8")) headers["Cache-Control"] = "no-cache";
-
-    return c.body(await file.arrayBuffer(), { headers });
-  } catch (error) {
-    console.error(`Error serving HLS file: ${filePath}`, error);
-    return c.text("Internal Server Error", 500);
-  }
+      "Cache-Control": "public, max-age=86400",
+    },
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -166,7 +299,7 @@ app.get("/api/segments", async (c) => {
     const files = await readdir(segmentDir).catch(() => [] as string[]);
     const segments = await Promise.all(
       files
-        .filter((f) => f.startsWith(segmentPrefix) && f.endsWith(".mp4"))
+        .filter((f) => f.startsWith(segmentPrefix) && f.endsWith(".mp4") && isPrimarySegmentName(f))
         .sort()
         .map(async (f) => {
           const fullPath = join(segmentDir, f);
@@ -218,18 +351,137 @@ app.post("/api/extract", async (c) => {
     const msg = error instanceof Error ? error.message : String(error);
     if (msg.includes("already exists") || msg.includes("File exists")) {
       if (body.offset !== undefined) {
-        const truncatedPath = `${body.src_path}.${body.offset}`;
-        const otsPath = `${truncatedPath}.ots`;
-        const truncExists = await Bun.file(truncatedPath).exists();
-        const otsExists = await Bun.file(otsPath).exists();
-        if (truncExists && otsExists) {
-          return c.json({ truncatedPath, otsPath, alreadyExisted: true });
+        const candidates = extractOutputCandidates(body.src_path, body.offset);
+        for (const candidate of candidates) {
+          const exists = await Bun.file(candidate.truncatedPath).exists()
+            && await Bun.file(candidate.otsPath).exists();
+          if (exists) {
+            return c.json({
+              truncatedPath: candidate.truncatedPath,
+              otsPath: candidate.otsPath,
+              alreadyExisted: true,
+            });
+          }
         }
       }
       return c.json({ error: "Output files already exist: " + msg }, 409);
     }
     return c.json({ error: msg }, 500);
   }
+});
+
+app.post("/api/extract-zip", async (c) => {
+  let body: {
+    segment_name?: string;
+    offset?: number;
+  };
+
+  try { body = await c.req.json(); }
+  catch { return c.json({ error: "Invalid JSON body" }, 400); }
+
+  if (!otslogBin) return c.json({ error: "otslog-bin not configured" }, 500);
+  if (!body.segment_name) return c.json({ error: "segment_name is required" }, 400);
+  if (body.offset === undefined) return c.json({ error: "offset is required" }, 400);
+
+  const segmentName = body.segment_name;
+  const offset = Number(body.offset);
+
+  if (!segmentName.startsWith(segmentPrefix) || !SEGMENT_NAME_RE.test(segmentName)) {
+    return c.json({ error: "Invalid segment_name" }, 400);
+  }
+  if (segmentName.includes("/") || segmentName.includes("\\") || segmentName.includes("..")) {
+    return c.json({ error: "Invalid segment_name" }, 400);
+  }
+  if (!Number.isSafeInteger(offset) || offset < 0) {
+    return c.json({ error: "offset must be a non-negative number" }, 400);
+  }
+
+  const srcPath = join(segmentDir, segmentName);
+  const resolvedSrcPath = resolve(srcPath);
+  if (!resolvedSrcPath.startsWith(segmentDir + "/")) {
+    return c.json({ error: "Forbidden: path outside allowed directory" }, 403);
+  }
+
+  const srcFile = Bun.file(resolvedSrcPath);
+  if (!await srcFile.exists()) {
+    return c.json({ error: "Segment not found" }, 404);
+  }
+
+  const srcSize = srcFile.size;
+  if (!Number.isFinite(srcSize) || srcSize <= 0) {
+    return c.json({ error: "Segment is empty or unavailable" }, 422);
+  }
+  if (offset > srcSize) {
+    return c.json({ error: `offset exceeds segment size (${srcSize})` }, 422);
+  }
+
+  let extractResult: { truncatedPath: string; otsPath: string };
+  try {
+    extractResult = await extract({
+      bin: otslogBin,
+      srcPath: resolvedSrcPath,
+      offset,
+    });
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : String(error);
+    if (msg.includes("already exists") || msg.includes("File exists")) {
+      const candidates = extractOutputCandidates(resolvedSrcPath, offset);
+      let found: { truncatedPath: string; otsPath: string } | null = null;
+      for (const candidate of candidates) {
+        const exists = await Bun.file(candidate.truncatedPath).exists()
+          && await Bun.file(candidate.otsPath).exists();
+        if (exists) {
+          found = candidate;
+          break;
+        }
+      }
+
+      if (!found) {
+        return c.json({ error: "Extract output files already exist but could not be resolved" }, 409);
+      }
+      extractResult = found;
+    } else {
+      return c.json({ error: msg }, 500);
+    }
+  }
+
+  const truncatedResolved = resolve(extractResult.truncatedPath);
+  const otsResolved = resolve(extractResult.otsPath);
+  if (!truncatedResolved.startsWith(segmentDir + "/") || !otsResolved.startsWith(segmentDir + "/")) {
+    return c.json({ error: "Forbidden: output outside allowed directory" }, 403);
+  }
+
+  const truncatedFile = Bun.file(truncatedResolved);
+  const otsFile = Bun.file(otsResolved);
+
+  if (!await truncatedFile.exists() || !await otsFile.exists()) {
+    return c.json({ error: "Extract output files not found" }, 500);
+  }
+
+  const truncatedData = new Uint8Array(await truncatedFile.arrayBuffer());
+  const otsData = new Uint8Array(await otsFile.arrayBuffer());
+
+  const combinedSize = truncatedData.byteLength + otsData.byteLength;
+  if (combinedSize > MAX_ZIP_BYTES) {
+    return c.json({ error: `ZIP exceeds max size (${MAX_ZIP_BYTES} bytes)` }, 413);
+  }
+
+  const zipBytes = buildStoredZip([
+    { name: basename(truncatedResolved), data: truncatedData },
+    { name: basename(otsResolved), data: otsData },
+  ]);
+
+  const zipName = `${segmentName}.${offset}.zip`.replace(/[\r\n"]/g, "_");
+  const zipBuffer = new ArrayBuffer(zipBytes.byteLength);
+  new Uint8Array(zipBuffer).set(zipBytes);
+
+  return c.body(zipBuffer, {
+    headers: {
+      "Content-Type": "application/zip",
+      "Content-Disposition": `attachment; filename="${zipName}"`,
+      "Content-Length": String(zipBytes.byteLength),
+    },
+  });
 });
 
 // GET /api/download
@@ -267,7 +519,6 @@ app.get("/api/status", (c) => {
     stamping: watcher?.activeSegments() ?? [],
     clients: stampClients.size,
     segmentDir,
-    hlsDir,
   });
 });
 
@@ -338,8 +589,8 @@ process.on("SIGTERM", () => shutdown("SIGTERM"));
 async function cleanArtifacts() {
   const { rm, readdir } = await import("node:fs/promises");
   const { join } = await import("node:path");
-  console.log("[clean] removing segments/, hls/ and otslog artifacts...");
-  for (const dir of [segmentDir, hlsDir]) {
+  console.log("[clean] removing segments/ and otslog artifacts...");
+  for (const dir of [segmentDir]) {
     try {
       const entries = await readdir(dir);
       await Promise.all(entries.map(e => rm(join(dir, e), { recursive: true, force: true })));
@@ -368,7 +619,6 @@ async function autoStartFfmpeg() {
       segmentDir,
       segmentTime,
       segmentPrefix,
-      hlsDir,
       bin: ffmpegBin,
     });
 

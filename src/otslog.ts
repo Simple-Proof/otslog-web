@@ -1,5 +1,6 @@
 import { splitLines } from "./line-splitter.ts";
 import type { Subprocess } from "bun";
+import { extname } from "node:path";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -54,9 +55,9 @@ export interface ExtractOpts {
 }
 
 export interface ExtractResult {
-  /** Path to the truncated source file (FILE.OFFSET) */
+  /** Path to the truncated source file */
   truncatedPath: string;
-  /** Path to the OTS proof file (FILE.OFFSET.ots) */
+  /** Path to the OTS proof file */
   otsPath: string;
 }
 
@@ -286,15 +287,6 @@ export async function extract(opts: ExtractOpts): Promise<ExtractResult> {
     throw new Error(`otslog extract exited with code ${exitCode}: ${stderrText.trim()}`);
   }
 
-  // If offset is explicit, we know the exact paths
-  if (opts.offset !== undefined) {
-    const truncatedPath = `${opts.srcPath}.${opts.offset}`;
-    return { truncatedPath, otsPath: `${truncatedPath}.ots` };
-  }
-
-  // For timestamp lookups, parse stderr for the dbg!() paths.
-  // The Rust code does: dbg!(dbg!(truncated_src_path).with_added_extension("ots"))
-  // which outputs lines like: [src/bin/otslog.rs:216] ... = "FILE.OFFSET.ots"
   const quotedMatch = stderrText.match(/"([^"]+\.ots)"/m);
   if (quotedMatch && quotedMatch[1]) {
     const otsPath = quotedMatch[1];
@@ -302,7 +294,27 @@ export async function extract(opts: ExtractOpts): Promise<ExtractResult> {
     return { truncatedPath, otsPath };
   }
 
-  // Fallback: we can't determine paths from stderr
+  if (opts.offset !== undefined) {
+    const ext = extname(opts.srcPath);
+    const stem = ext ? opts.srcPath.slice(0, -ext.length) : opts.srcPath;
+    const candidates = [
+      `${stem}[${opts.offset}]${ext}`,
+      `${opts.srcPath}.${opts.offset}`,
+    ];
+
+    for (const truncatedPath of candidates) {
+      const otsPath = `${truncatedPath}.ots`;
+      const hasTruncated = await Bun.file(truncatedPath).exists();
+      const hasOts = await Bun.file(otsPath).exists();
+      if (hasTruncated && hasOts) {
+        return { truncatedPath, otsPath };
+      }
+    }
+
+    const truncatedPath = `${opts.srcPath}.${opts.offset}`;
+    return { truncatedPath, otsPath: `${truncatedPath}.ots` };
+  }
+
   throw new Error(
     "Could not determine output paths from otslog extract. " +
     "Use explicit offset instead of timestamp, or run list() first to resolve."

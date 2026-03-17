@@ -25,14 +25,6 @@ export interface FfmpegOpts {
   segmentTime?: number;
   /** Filename prefix for segments (default: "output_") */
   segmentPrefix?: string;
-  /** Directory for HLS segments */
-  hlsDir: string;
-  /** HLS playlist filename inside hlsDir (default: "live.m3u8") */
-  hlsPlaylist?: string;
-  /** HLS segment duration in seconds (default: 4) */
-  hlsTime?: number;
-  /** Max playlist entries before oldest is removed (default: 10) */
-  hlsListSize?: number;
   /** Path to ffmpeg binary (default: "ffmpeg") */
   bin?: string;
 }
@@ -59,12 +51,6 @@ export function isFfmpegRunning(): boolean {
 // ---------------------------------------------------------------------------
 
 function buildFfmpegArgs(opts: FfmpegOpts, segmentFile: string): string[] {
-  const hlsPlaylist = opts.hlsPlaylist ?? "live.m3u8";
-  const hlsTime = opts.hlsTime ?? 4;
-  const hlsListSize = opts.hlsListSize ?? 10;
-
-  const hlsOutput = `${opts.hlsDir}/${hlsPlaylist}`;
-
   return [
     // Input
     "-rtsp_transport", "tcp",
@@ -78,19 +64,6 @@ function buildFfmpegArgs(opts: FfmpegOpts, segmentFile: string): string[] {
     "-f", "mp4",
     "-movflags", "frag_keyframe+empty_moov+default_base_moof",
     segmentFile,
-
-    // Output 2: HLS live stream
-    "-c:v", "libx264",
-    "-preset", "ultrafast",
-    "-tune", "zerolatency",
-    "-an",
-    "-g", String(hlsTime * 25),
-    "-sc_threshold", "0",
-    "-f", "hls",
-    "-hls_time", String(hlsTime),
-    "-hls_list_size", String(hlsListSize),
-    "-hls_flags", "delete_segments+independent_segments",
-    hlsOutput,
   ];
 }
 
@@ -109,7 +82,6 @@ export async function startFfmpeg(opts: FfmpegOpts): Promise<FfmpegProcess> {
   }
 
   await mkdir(opts.segmentDir, { recursive: true });
-  await mkdir(opts.hlsDir, { recursive: true });
 
   const bin = opts.bin ?? "ffmpeg";
   const segmentTime = opts.segmentTime ?? 600;

@@ -368,6 +368,11 @@
             background: rgba(88, 166, 255, 0.05);
         }
 
+        .seg-group.extracting .seg-header {
+            opacity: 0.65;
+            cursor: wait;
+        }
+
         .seg-header-left {
             display: flex;
             align-items: center;
@@ -439,6 +444,7 @@
             font-family: var(--font-mono);
             font-size: 11px;
             line-height: 1.5;
+            cursor: pointer;
         }
 
         .stamp-row:hover {
@@ -513,6 +519,56 @@
             margin-bottom: 0;
             flex-shrink: 0;
         }
+
+        .system-box {
+            border: 1px solid var(--border-light);
+            border-radius: 8px;
+            margin-bottom: 8px;
+            overflow: hidden;
+            background: #fff;
+            flex-shrink: 0;
+        }
+
+        .system-box-toggle {
+            width: 100%;
+            border: 0;
+            background: var(--background-light);
+            color: var(--text-secondary-corp);
+            padding: 7px 10px;
+            font-size: 11px;
+            font-family: var(--font-medium);
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+        }
+
+        .system-box-toggle:hover {
+            color: var(--primary-color);
+        }
+
+        .system-box-chevron {
+            color: var(--text-lighter);
+            font-size: 11px;
+            transition: transform 0.15s;
+        }
+
+        .system-box.collapsed .system-box-chevron {
+            transform: rotate(-90deg);
+        }
+
+        .system-box-body {
+            max-height: 110px;
+            overflow-y: auto;
+            border-top: 1px solid var(--border-light);
+        }
+
+        .system-box.collapsed .system-box-body {
+            display: none;
+        }
+
         .global-log .raw-line {
             padding: 2px 0;
         }
@@ -547,25 +603,425 @@
             border-bottom-color: var(--accent-color);
         }
 
-        .tab-pane { display: none; flex: 1; min-height: 0; flex-direction: column; }
-        .tab-pane.active { display: flex; }
+        .tab-pane {
+            display: none;
+            height: 100%;
+            overflow: hidden;
+        }
+
+        .tab-pane.active {
+            display: block;
+            overflow-y: auto;
+            overscroll-behavior: contain;
+        }
 
         /* ── Scrollbar (sidebar) ─────────────────────────── */
         .sidebar::-webkit-scrollbar { width: 5px; }
         .sidebar::-webkit-scrollbar-track { background: transparent; }
         .sidebar::-webkit-scrollbar-thumb { background: var(--border-color); border-radius: 3px; }
         .sidebar::-webkit-scrollbar-thumb:hover { background: var(--text-secondary); }
-        /* ── Responsive ──────────────────────────────────────── */
-        @media (max-width: 860px) {
+        :root {
+            --ion-color-primary: #001a72;
+            --ion-color-primary-shade: #00134d;
+            --ion-color-tertiary: #f7931e;
+            --ion-color-tertiary-shade: #d67c29;
+            --primary-color: var(--ion-color-primary, #001a72);
+            --primary-shade: var(--ion-color-primary-shade, #00134d);
+            --tertiary-color: var(--ion-color-tertiary, #f7931e);
+            --tertiary-shade: var(--ion-color-tertiary-shade, #d67c29);
+            --text-color: #4f5053;
+            --text-secondary-corp: #717277;
+            --text-dark: #383838;
+            --text-light: #666;
+            --text-lighter: #999;
+            --background-color: #f2f4f8;
+            --background-light: #f8f9fa;
+            --background-button-light: #dedede;
+            --border-light: #eee;
+            --border-medium: #e0e0e0;
+            --box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+            --box-shadow-light: 0 1px 3px rgba(0, 0, 0, 0.1);
+            --card-bg: #fff;
+            --font-body: "IBM-Regular", "IBM Plex Sans", -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+            --font-heading: "IBM-Bold", "IBM Plex Sans", sans-serif;
+            --font-medium: "IBM-Medium", "IBM Plex Sans", sans-serif;
+            --font-semibold: "IBM-SemiBold", "IBM Plex Sans", sans-serif;
+            --danger: #fe6d73;
+            --success: #3fb950;
+            --radius: 10px;
+            --accent-color: var(--tertiary-color);
+            --accent-hover: #ffac4f;
+            --accent-active: var(--tertiary-shade);
+            --bg-primary: var(--background-color);
+            --bg-secondary: var(--card-bg);
+            --border-color: var(--border-medium);
+            --text-primary: var(--text-dark);
+        }
+
+        body {
+            background: var(--background-color);
+            color: var(--text-color);
+            font-family: var(--font-body);
+        }
+
+        .shell {
+            min-height: 100dvh;
+            height: 100dvh;
+        }
+
+        .topbar {
+            background: linear-gradient(100deg, var(--primary-shade) 0%, var(--primary-color) 74%);
+            border-bottom: 0;
+            padding: 8px 10px;
+            gap: 10px;
+            flex-wrap: wrap;
+        }
+
+        .topbar-brand {
+            min-width: 0;
+            gap: 8px;
+        }
+
+        .topbar-logo {
+            width: 140px;
+            height: 30px;
+        }
+
+        .topbar-logo img {
+            width: 100%;
+            height: 100%;
+            object-fit: contain;
+            display: block;
+        }
+
+        .topbar h1 {
+            display: none;
+        }
+
+        .topbar-status {
+            font-size: 11px;
+            color: rgba(255, 255, 255, 0.86);
+            margin-left: auto;
+        }
+
+        .status-dot {
+            background: rgba(255, 255, 255, 0.55);
+        }
+
+        .status-dot.live {
+            background: var(--tertiary-color);
+            box-shadow: 0 0 8px rgba(247, 147, 30, 0.55);
+        }
+
+        .content {
+            grid-template-columns: 1fr;
+            grid-template-rows: auto minmax(0, 1fr);
+            gap: 8px;
+            padding: 4px;
+            background: var(--background-color);
+            align-content: start;
+            overflow: hidden;
+            overflow-x: hidden;
+            min-height: 0;
+        }
+
+        .video-panel {
+            padding: 0;
+            gap: 8px;
+        }
+
+        .video-wrapper {
+            border: 1px solid var(--border-medium);
+            border-radius: 12px;
+            box-shadow: var(--box-shadow-light);
+            aspect-ratio: 16 / 9;
+            min-height: 220px;
+            flex: none;
+        }
+
+        .video-overlay {
+            background: rgba(0, 26, 114, 0.52);
+        }
+
+        .video-overlay-icon {
+            border-color: rgba(255, 255, 255, 0.35);
+        }
+
+        .video-overlay-icon svg {
+            stroke: #fff;
+        }
+
+        .video-overlay-text {
+            color: #fff;
+        }
+
+        .sidebar {
+            border-left: 0;
+            background: transparent;
+            overflow: hidden;
+            max-height: none;
+            gap: 8px;
+            min-height: 0;
+            height: 100%;
+        }
+
+        .sidebar-section {
+            background: var(--card-bg);
+            border: 1px solid var(--border-medium);
+            border-radius: 12px;
+            box-shadow: var(--box-shadow-light);
+            padding: 10px;
+        }
+
+        .logs-section {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            min-height: 0;
+            overflow: hidden;
+            height: 100%;
+        }
+
+        .outputs-scroll-wrap {
+            flex: 1;
+            min-height: 0;
+            overflow: hidden;
+            display: flex;
+            flex-direction: column;
+        }
+
+        .sidebar-section:last-child {
+            border-bottom: 1px solid var(--border-medium);
+        }
+
+        .sidebar-title {
+            color: var(--primary-shade);
+            font-family: var(--font-semibold);
+            letter-spacing: 0.6px;
+        }
+
+        .btn {
+            min-height: 44px;
+            border-radius: 10px;
+            font-family: var(--font-medium);
+            font-size: 14px;
+            box-shadow: var(--box-shadow-light);
+        }
+
+        .btn-primary {
+            color: #fff;
+            background: linear-gradient(140deg, var(--tertiary-color) 0%, var(--tertiary-shade) 100%);
+        }
+
+        .btn-primary:hover {
+            background: var(--accent-hover);
+            color: #fff;
+        }
+
+        .btn-primary:active {
+            background: var(--accent-active);
+        }
+
+        .btn-danger {
+            color: var(--danger);
+            background: #fff;
+            border-color: rgba(254, 109, 115, 0.6);
+        }
+
+        .btn-danger:hover {
+            background: #fff2f3;
+        }
+
+        .global-log {
+            border-bottom-color: var(--border-light);
+        }
+
+        .global-log .raw-line {
+            color: var(--text-light);
+        }
+
+        .tab-bar {
+            border-bottom: 1px solid var(--border-light);
+            background: var(--background-light);
+            border-radius: 8px;
+            overflow: hidden;
+        }
+
+        .tab-btn {
+            padding: 9px 0;
+            color: var(--text-secondary-corp);
+            font-family: var(--font-medium);
+        }
+
+        .tab-btn.active {
+            color: var(--primary-color);
+            border-bottom-color: var(--primary-color);
+            background: #fff;
+        }
+
+        .stamp-panel {
+            min-height: 0;
+            max-height: none;
+            overflow-y: auto;
+            overscroll-behavior: contain;
+        }
+
+        .seg-group {
+            border-color: var(--border-medium);
+            background: #fff;
+            box-shadow: var(--box-shadow-light);
+            flex-shrink: 0;
+        }
+
+        .seg-header {
+            background: var(--background-light);
+        }
+
+        .seg-header:hover {
+            background: #edf2ff;
+        }
+
+        .seg-header-left {
+            color: var(--primary-color);
+        }
+
+        .seg-badge.started {
+            background: rgba(68, 95, 161, 0.2);
+            color: #445fa1;
+        }
+
+        .seg-badge.done {
+            background: rgba(63, 185, 80, 0.2);
+            color: #2d8c45;
+        }
+
+        .seg-badge.error {
+            background: rgba(254, 109, 115, 0.18);
+            color: var(--danger);
+        }
+
+        .seg-count {
+            color: var(--text-light);
+        }
+
+        .stamp-row:hover {
+            background: rgba(247, 147, 30, 0.12);
+        }
+
+        .stamp-time {
+            color: var(--text-dark);
+        }
+
+        .stamp-offset {
+            color: var(--text-secondary-corp);
+        }
+
+        .stamp-mid {
+            color: var(--primary-color);
+        }
+
+        .raw-line {
+            color: var(--text-light);
+        }
+
+        .raw-line.info {
+            color: var(--primary-color);
+        }
+
+        .raw-toggle {
+            color: var(--text-lighter);
+        }
+
+        .raw-toggle:hover {
+            color: var(--primary-color);
+        }
+
+        ::-webkit-scrollbar {
+            width: 10px;
+        }
+
+        ::-webkit-scrollbar-track {
+            background: #fff;
+        }
+
+        ::-webkit-scrollbar-thumb {
+            background: #e6e8f1;
+            border-radius: 10px;
+        }
+
+        ::-webkit-scrollbar-thumb:hover {
+            background: #ccd1e3;
+        }
+
+        @media (min-width: 576px) {
+            .topbar {
+                padding: 10px 14px;
+            }
+
+            .topbar-logo {
+                width: 168px;
+                height: 34px;
+            }
+
             .content {
-                grid-template-columns: 1fr;
-                grid-template-rows: 1fr auto;
+                padding: 8px;
+                gap: 10px;
+            }
+
+            .sidebar-section {
+                padding: 12px;
+            }
+        }
+
+        @media (min-width: 768px) {
+            .topbar {
+                padding: 12px 18px;
+            }
+
+            .topbar-status {
+                font-size: 12px;
+            }
+
+            .content {
+                padding: 10px;
+            }
+
+            .logs-section {
+                height: 100%;
             }
 
             .sidebar {
-                border-left: none;
-                border-top: 1px solid var(--border-color);
-                max-height: 50vh;
+                overflow: hidden;
+            }
+        }
+
+        @media (min-width: 992px) {
+            .content {
+                grid-template-columns: minmax(0, 1fr) 360px;
+                grid-template-rows: 1fr;
+                align-items: stretch;
+                overflow: hidden;
+            }
+
+            .video-panel {
+                min-height: 0;
+            }
+
+            .video-wrapper {
+                aspect-ratio: auto;
+                min-height: 0;
+                height: 100%;
+            }
+
+            .sidebar {
+                overflow: hidden;
+                max-height: none;
+                gap: 10px;
+            }
+
+            .logs-section {
+                min-height: 0;
+                height: 100%;
             }
         }
     </style>
@@ -575,7 +1031,7 @@
         <!-- Top bar -->
         <header class="topbar">
             <div class="topbar-brand">
-                <div class="topbar-logo"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 2000 2000"><polygon fill="#fff" points="1769.1 545.3 999.3 1001.1 659.4 798.5 659.4 1059.8 998.2 1263.1 1769.1 807.7 1769.1 545.4 1769.1 545.3"/><polygon fill="#f88e2b" points="1544.5 1154.5 1544.5 1318.8 1000 1639.3 455.5 1318.8 455.5 673.7 1000 359.3 1360.7 567.6 1583.1 436.7 1000 100 230.9 544 230.9 1447.2 1000 1900 1769.1 1447.2 1769.1 1022.3 1544.5 1154.5"/></svg></div>
+                <div class="topbar-logo"><img src="/assets/sp-full-logo-orange-white.svg" alt="SimpleProof" /></div>
                 <h1>otslog</h1>
             </div>
             <div class="topbar-status">
@@ -606,23 +1062,25 @@
 
             <!-- Sidebar config -->
             <aside class="sidebar">
-                <div class="sidebar-section">
-                    <div class="sidebar-title">Stream</div>
-                    <div class="btn-group">
-                        <button class="btn btn-primary" id="btnStartStream">▶ Load Stream</button>
-                        <button class="btn btn-danger" id="btnStopStream">■ Stop</button>
+                <div class="sidebar-section logs-section">
+                    <div class="sidebar-title">otslog output</div>
+                    <div class="system-box collapsed" id="systemBox">
+                        <button class="system-box-toggle" id="systemBoxToggle" type="button">
+                            <span>system messages</span>
+                            <span class="system-box-chevron">▾</span>
+                        </button>
+                        <div class="system-box-body">
+                            <div id="globalLog" class="global-log"></div>
+                        </div>
                     </div>
-                </div>
-
-                <div class="sidebar-section" style="flex: 1; display: flex; flex-direction: column; min-height: 0;">
-                    <div class="sidebar-title" style="flex-shrink:0;">otslog output</div>
-                    <div id="globalLog" class="global-log"></div>
                     <div class="tab-bar">
                         <button class="tab-btn active" id="tabBtnActive">Active</button>
                         <button class="tab-btn" id="tabBtnHistory">History</button>
                     </div>
-                    <div class="tab-pane active stamp-panel" id="paneActive"></div>
-                    <div class="tab-pane stamp-panel" id="paneHistory"></div>
+                    <div class="outputs-scroll-wrap">
+                        <div class="tab-pane active stamp-panel" id="paneActive"></div>
+                        <div class="tab-pane stamp-panel" id="paneHistory"></div>
+                    </div>
                 </div>
             </aside>
         </div>
@@ -640,8 +1098,7 @@
             var statusText  = document.getElementById("statusText");
             var wsDot       = document.getElementById("wsDot");
             var wsStatusEl  = document.getElementById("wsStatus");
-            var btnStart    = document.getElementById("btnStartStream");
-            var btnStop     = document.getElementById("btnStopStream");
+            var streamUrl   = "https://stream.simpleproof.xyz/stream/index.m3u8";
 
             var hls              = null;
             var stampWs          = null;
@@ -650,8 +1107,14 @@
             var paneActive  = document.getElementById("paneActive");
             var paneHistory = document.getElementById("paneHistory");
             var globalLog   = document.getElementById("globalLog");
+            var systemBox   = document.getElementById("systemBox");
+            var systemToggle = document.getElementById("systemBoxToggle");
             var tabBtnActive  = document.getElementById("tabBtnActive");
             var tabBtnHistory = document.getElementById("tabBtnHistory");
+
+            systemToggle.addEventListener("click", function () {
+                systemBox.classList.toggle("collapsed");
+            });
 
             tabBtnActive.addEventListener("click", function () {
                 tabBtnActive.classList.add("active");
@@ -727,23 +1190,80 @@
                 group.appendChild(header);
                 group.appendChild(body);
 
-                // Collapse/expand on header click
-                header.addEventListener("click", function () {
+                chevron.addEventListener("click", function (e) {
+                    e.stopPropagation();
                     group.classList.toggle("collapsed");
                 });
 
-                paneActive.appendChild(group);
-
-                segments[name] = {
+                var segmentState = {
+                    name: name,
                     el: group,
                     bodyEl: body,
                     countEl: countEl,
                     badgesEl: right,
                     rawSection: rawSection,
                     rawLines: rawLines,
-                    count: 0
+                    count: 0,
+                    extracting: false
                 };
-                return segments[name];
+
+                header.addEventListener("click", function () {
+                    group.classList.toggle("collapsed");
+                });
+
+                paneActive.appendChild(group);
+                segments[name] = segmentState;
+                return segmentState;
+            }
+
+            function extractSegmentZip(segmentName, offset, seg) {
+                if (seg.extracting) return;
+
+                seg.extracting = true;
+                seg.el.classList.add("extracting");
+                log("[" + segmentName + "] extracting offset=" + offset + " …", "info");
+
+                fetch("/api/extract-zip", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({
+                        segment_name: segmentName,
+                        offset: offset
+                    })
+                })
+                .then(function (response) {
+                    if (!response.ok) {
+                        return response.json().catch(function () {
+                            return { error: "extract failed: HTTP " + response.status };
+                        }).then(function (data) {
+                            throw new Error(data.error || ("extract failed: HTTP " + response.status));
+                        });
+                    }
+
+                    var disposition = response.headers.get("Content-Disposition") || "";
+                    var match = disposition.match(/filename="?([^";]+)"?/i);
+                    var downloadName = match && match[1] ? match[1] : (segmentName + ".zip");
+
+                    return response.blob().then(function (blob) {
+                        var url = URL.createObjectURL(blob);
+                        var a = document.createElement("a");
+                        a.href = url;
+                        a.download = downloadName;
+                        document.body.appendChild(a);
+                        a.click();
+                        a.remove();
+                        URL.revokeObjectURL(url);
+                        log("[" + segmentName + "] zip downloaded", "success");
+                    });
+                })
+                .catch(function (error) {
+                    var msg = error && error.message ? error.message : String(error);
+                    log("[" + segmentName + "] extract error: " + msg, "error");
+                })
+                .finally(function () {
+                    seg.extracting = false;
+                    seg.el.classList.remove("extracting");
+                });
             }
 
             function addStatus(seg, statusWord) {
@@ -772,6 +1292,11 @@
             }
 
             function addStamp(seg, offset, unixTime, midstate) {
+                var offsetNum = parseInt(offset, 10);
+                if (seg.count === 0 && offsetNum === 28) {
+                    return;
+                }
+
                 seg.count++;
                 seg.countEl.textContent = seg.count + (seg.count === 1 ? " stamp" : " stamps");
 
@@ -789,6 +1314,16 @@
                     "<span class='stamp-time'>" + timeStr + "</span>" +
                     "<span class='stamp-offset'>+" + offset + "</span>" +
                     "<span class='stamp-mid'>" + midShort + "</span>";
+
+                row.addEventListener("click", function (e) {
+                    e.stopPropagation();
+                    var clickOffset = parseInt(offset, 10);
+                    if (isNaN(clickOffset)) {
+                        log("[" + seg.name + "] invalid offset: " + offset, "error");
+                        return;
+                    }
+                    extractSegmentZip(seg.name, clickOffset, seg);
+                });
 
                 // Insert before raw section
                 seg.bodyEl.insertBefore(row, seg.rawSection);
@@ -835,6 +1370,9 @@
                 line.className = "raw-line" + (cls ? " " + cls : "");
                 line.textContent = text;
                 globalLog.appendChild(line);
+                if (globalLog.childNodes.length > 200) {
+                    globalLog.removeChild(globalLog.firstChild);
+                }
             }
 
             // ── Status ────────────────────────────────────────
@@ -857,7 +1395,6 @@
 
             function initPlayer(url) {
                 destroyPlayer();
-                log("loading " + url + " …", "info");
 
                 if (typeof Hls !== "undefined" && Hls.isSupported()) {
                     hls = new Hls({
@@ -875,7 +1412,6 @@
                     hls.on(Hls.Events.MANIFEST_PARSED, function () {
                         overlay.classList.add("hidden");
                         setStatus("live", "live");
-                        log("manifest parsed — playing", "success");
                         video.play().catch(function () {});
                     });
 
@@ -900,24 +1436,12 @@
                     video.addEventListener("loadedmetadata", function () {
                         overlay.classList.add("hidden");
                         setStatus("live", "live");
-                        log("native HLS — playing", "success");
                         video.play().catch(function () {});
                     });
                 } else {
                     log("HLS not supported in this browser", "error");
                 }
             }
-
-
-            // ── Button handlers ───────────────────────────────
-            btnStart.addEventListener("click", function () {
-                initPlayer("/stream/live.m3u8");
-            });
-
-            btnStop.addEventListener("click", function () {
-                destroyPlayer();
-                log("stream stopped", "info");
-            });
 
             // ── Cleanup on unload ─────────────────────────────
             window.addEventListener("beforeunload", function () {
@@ -953,9 +1477,9 @@
                         if (msg.line) {
                             log(msg.line);
                         } else if (msg.status) {
-                            // msg.status value is already "[segment.mp4] done" from server
-                            // or a global status like "stamping: ..." — pass directly, no extra prefix
-                            log(msg.status, "info");
+                            if (!msg.status.startsWith("stamping:")) {
+                                log(msg.status, "info");
+                            }
                             // Update WS indicator based on whether any segment is being stamped
                             if (/started|running/.test(msg.status)) {
                                 setWsStatus("live", "ws: stamping");
@@ -983,7 +1507,7 @@
             }
 
             // ── Auto-start everything ─────────────────────────
-            initPlayer("/stream/live.m3u8");
+            initPlayer(streamUrl);
             connectStampWs();
         })();
     </script>

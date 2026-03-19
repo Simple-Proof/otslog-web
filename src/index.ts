@@ -301,7 +301,40 @@ app.get("/", async (c) => {
   });
 });
 
-app.get("/favicon.ico", (c) => c.body(null, 204));
+app.get("/favicon.ico", async (c) => {
+  const file = Bun.file("./src/favicon.ico");
+  return c.body(await file.arrayBuffer(), {
+    headers: { "Content-Type": "image/x-icon" },
+  });
+});
+
+app.get("/favicon.png", async (c) => {
+  const file = Bun.file("./src/favicon.png");
+  return c.body(await file.arrayBuffer(), {
+    headers: { "Content-Type": "image/png" },
+  });
+});
+
+app.get("/apple-touch-icon.png", async (c) => {
+  const file = Bun.file("./src/apple-touch-icon.png");
+  return c.body(await file.arrayBuffer(), {
+    headers: { "Content-Type": "image/png" },
+  });
+});
+
+app.get("/og-image.png", async (c) => {
+  const file = Bun.file("./src/og-image.png");
+  return c.body(await file.arrayBuffer(), {
+    headers: { "Content-Type": "image/png" },
+  });
+});
+
+app.get("/og-image.webp", async (c) => {
+  const file = Bun.file("./src/og-image.webp");
+  return c.body(await file.arrayBuffer(), {
+    headers: { "Content-Type": "image/webp" },
+  });
+});
 
 app.get("/vendor/hls.min.js", async (c) => {
   const file = Bun.file("./src/vendor/hls.min.js");

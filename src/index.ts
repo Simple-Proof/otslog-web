@@ -7,6 +7,7 @@ import { list, extract } from "./otslog.ts";
 import { startFfmpeg, isFfmpegRunning } from "./ffmpeg.ts";
 import type { FfmpegProcess } from "./ffmpeg.ts";
 import { SegmentWatcher } from "./segment-watcher.ts";
+import { saveStamp, getAllStamps, getStampsBySegment, saveSegment, markSegmentStamping, markSegmentCompleted, getSegments, clearDb } from "./db.ts";
 
 // ---------------------------------------------------------------------------
 // CLI arguments
@@ -394,7 +395,7 @@ app.get("/api/segments", async (c) => {
     const files = await readdir(segmentDir).catch(() => [] as string[]);
     const segments = await Promise.all(
       files
-        .filter((f) => f.startsWith(segmentPrefix) && f.endsWith(".mp4") && isPrimarySegmentName(f))
+        .filter((f) => isPrimarySegmentName(f))
         .sort()
         .map(async (f) => {
           const fullPath = join(segmentDir, f);
@@ -626,6 +627,18 @@ app.get("/api/status", (c) => {
   });
 });
 
+app.get("/api/stamps", (c) => {
+  const segment = c.req.query("segment");
+  if (segment) {
+    return c.json({ stamps: getStampsBySegment(segment) });
+  }
+  return c.json({ stamps: getAllStamps() });
+});
+
+app.get("/api/segments-sql", (c) => {
+  return c.json({ segments: getSegments() });
+});
+
 app.get("/api/cameras", (c) => {
   return c.json({
     cameras: cameras.map((camera) => ({
@@ -712,6 +725,8 @@ async function cleanArtifacts() {
       await Promise.all(entries.map(e => rm(join(dir, e), { recursive: true, force: true })));
     } catch {}
   }
+  console.log("[clean] clearing database...");
+  clearDb();
   console.log("[clean] done");
 }
 
@@ -783,13 +798,32 @@ function autoStartWatcher() {
       followInterval,
       idleTimeout,
       onLine: (segment, line) => {
-        console.log(`[otslog:${camera.id}:${basename(segment)}] ${line}`);
+        const segName = basename(segment)!;
+        console.log(`[otslog:${camera.id}:${segName}] ${line}`);
         broadcastLine(segment, line);
+
+        const stampMatch = line.match(/^Stamped\s+offset=(\d+)\s+time=(\d+)\s+midstate=([0-9a-f]+)/i);
+        if (stampMatch) {
+          saveStamp({
+            segment_name: segName,
+            offset: parseInt(stampMatch[1]!, 10),
+            time: parseInt(stampMatch[2]!, 10),
+            midstate: stampMatch[3]!,
+          });
+          saveSegment({ name: segName, camera_id: camera.id, stamping: 1 });
+        }
       },
       onStatus: (segment, status, detail) => {
+        const segName = basename(segment)!;
         const msg = detail ? `${status}: ${detail}` : status;
-        console.log(`[otslog:${camera.id}:${basename(segment)}] ${msg}`);
+        console.log(`[otslog:${camera.id}:${segName}] ${msg}`);
         broadcastStatus(segment, msg);
+
+        if (status === "started") {
+          markSegmentStamping(segName, true);
+        } else if (status === "done") {
+          markSegmentCompleted(segName);
+        }
       },
     });
 

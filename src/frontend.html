@@ -402,6 +402,40 @@
             cursor: wait;
         }
 
+        .seg-group.extracting .seg-header-left::after {
+            content: "";
+            display: inline-block;
+            width: 12px;
+            height: 12px;
+            margin-left: 8px;
+            border: 2px solid var(--accent-color);
+            border-top-color: transparent;
+            border-radius: 50%;
+            animation: spin 0.8s linear infinite;
+            flex-shrink: 0;
+        }
+
+        .stamp-row.extracting {
+            opacity: 0.6;
+            cursor: wait;
+        }
+
+        .stamp-row.extracting::before {
+            content: "";
+            display: inline-block;
+            width: 10px;
+            height: 10px;
+            margin-right: 6px;
+            border: 2px solid var(--success-color, #3fb950);
+            border-top-color: transparent;
+            border-radius: 50%;
+            animation: spin 0.6s linear infinite;
+        }
+
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+
         .seg-header-left {
             display: flex;
             align-items: center;
@@ -456,7 +490,7 @@
 
         .seg-body {
             padding: 4px 0;
-            max-height: 200px;
+            max-height: 400px;
             overflow-y: auto;
         }
 
@@ -1205,6 +1239,9 @@
                     initPlayer(streamUrl);
                 }
                 applyCameraFilter();
+                var url = new URL(window.location.href);
+                url.searchParams.set("cam", activeCameraId.replace("cam", ""));
+                window.history.replaceState({}, "", url);
             });
 
             function loadCameraConfig() {
@@ -1219,6 +1256,17 @@
                             throw new Error("no cameras configured");
                         }
 
+                        var urlParams = new URLSearchParams(window.location.search);
+                        var camParam = urlParams.get("cam");
+                        var selectedCamera = cameras[0];
+                        if (camParam) {
+                            var camIdFromUrl = camParam.length === 1 ? "cam0" + camParam : (camParam.length === 2 ? "cam" + camParam : camParam);
+                            var matchedCamera = cameras.find(function (c) { return c.id === camIdFromUrl || c.id.replace("cam0", "") === camParam; });
+                            if (matchedCamera) {
+                                selectedCamera = matchedCamera;
+                            }
+                        }
+
                         cameraSelect.innerHTML = "";
                         cameras.forEach(function (camera) {
                             var option = document.createElement("option");
@@ -1227,10 +1275,47 @@
                             cameraSelect.appendChild(option);
                         });
 
-                        activeCameraId = cameras[0].id;
+                        activeCameraId = selectedCamera.id;
                         cameraSelect.value = activeCameraId;
-                        streamUrl = cameras[0].hlsUrl;
+                        streamUrl = selectedCamera.hlsUrl;
+                        initPlayer(streamUrl);
                         applyCameraFilter();
+                        loadStampsFromDb();
+                    });
+            }
+
+            function loadStampsFromDb() {
+                return fetch("/api/segments-sql")
+                    .then(function (response) {
+                        if (!response.ok) return { segments: [] };
+                        return response.json();
+                    })
+                    .then(function (data) {
+                        if (!data.segments || !data.segments.length) return;
+                        data.segments.forEach(function (segData) {
+                            if (segments[segData.name]) return;
+                            var seg = getOrCreateSegment(segData.name);
+                            if (segData.completed) {
+                                seg.el.classList.add("completed");
+                            }
+                        });
+                    })
+                    .then(function () {
+                        return fetch("/api/stamps");
+                    })
+                    .then(function (response) {
+                        if (!response.ok) return { stamps: [] };
+                        return response.json();
+                    })
+                    .then(function (data) {
+                        if (!data.stamps || !data.stamps.length) return;
+                        data.stamps.forEach(function (stamp) {
+                            var seg = segments[stamp.segment_name];
+                            if (seg) {
+                                seg.count++;
+                                addStamp(seg, stamp.offset, stamp.time, stamp.midstate);
+                            }
+                        });
                     });
             }
 
@@ -1317,17 +1402,18 @@
                     group.classList.toggle("collapsed");
                 });
 
-                paneActive.appendChild(group);
+                paneActive.prepend(group);
                 segments[name] = segmentState;
                 applyCameraFilter();
                 return segmentState;
             }
 
-            function extractSegmentZip(segmentName, offset, seg) {
+            function extractSegmentZip(segmentName, offset, seg, rowEl) {
                 if (seg.extracting) return;
 
                 seg.extracting = true;
                 seg.el.classList.add("extracting");
+                if (rowEl) rowEl.classList.add("extracting");
                 log("[" + segmentName + "] extracting offset=" + offset + " …", "info");
 
                 fetch("/api/extract-zip", {
@@ -1370,6 +1456,7 @@
                 .finally(function () {
                     seg.extracting = false;
                     seg.el.classList.remove("extracting");
+                    if (rowEl) rowEl.classList.remove("extracting");
                 });
             }
 
@@ -1429,12 +1516,16 @@
                         log("[" + seg.name + "] invalid offset: " + offset, "error");
                         return;
                     }
-                    extractSegmentZip(seg.name, clickOffset, seg);
+                    extractSegmentZip(seg.name, clickOffset, seg, row);
                 });
 
                 // Insert before raw section
                 seg.bodyEl.insertBefore(row, seg.rawSection);
-                seg.bodyEl.scrollTop = seg.bodyEl.scrollHeight;
+                // Auto-scroll only if user is near bottom (within 50px)
+                var isNearBottom = seg.bodyEl.scrollHeight - seg.bodyEl.scrollTop - seg.bodyEl.clientHeight < 50;
+                if (isNearBottom) {
+                    seg.bodyEl.scrollTop = seg.bodyEl.scrollHeight;
+                }
             }
 
             function addRaw(seg, text, cls) {

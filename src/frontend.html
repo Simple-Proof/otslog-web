@@ -1477,11 +1477,11 @@
                 if (typeof Hls !== "undefined" && Hls.isSupported()) {
                     hls = new Hls({
                         enableWorker: true,
-                        lowLatencyMode: false,
+                        lowLatencyMode: true,
                         liveSyncDurationCount: 2,
                         liveMaxLatencyDurationCount: 5,
-                        manifestLoadingMaxRetry: 10,
-                        manifestLoadingRetryDelay: 1000,
+                        manifestLoadingMaxRetry: 3,
+                        manifestLoadingRetryDelay: 2000,
                     });
 
                     hls.loadSource(url);

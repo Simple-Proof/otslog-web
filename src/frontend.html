@@ -497,6 +497,58 @@
             overflow-y: auto;
         }
 
+        .export-progress {
+            display: none;
+            margin: 4px 10px 8px;
+            padding: 6px 8px;
+            border: 1px solid var(--border-color);
+            border-radius: 6px;
+            background: rgba(88, 166, 255, 0.06);
+        }
+
+        .logs-section > .export-progress {
+            margin: 0 0 8px;
+        }
+
+        .export-progress.active {
+            display: block;
+        }
+
+        .export-progress-head {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            font-family: var(--font-mono);
+            font-size: 10px;
+            color: var(--text-secondary);
+            margin-bottom: 6px;
+        }
+
+        .export-progress-track {
+            width: 100%;
+            height: 6px;
+            border-radius: 4px;
+            background: rgba(255, 255, 255, 0.08);
+            overflow: hidden;
+        }
+
+        .export-progress-fill {
+            height: 100%;
+            width: 0%;
+            transition: width 0.25s ease;
+            background: var(--accent-color);
+        }
+
+        .export-cancel-btn {
+            border: 1px solid rgba(248, 81, 73, 0.35);
+            background: rgba(248, 81, 73, 0.12);
+            color: var(--danger);
+            border-radius: 4px;
+            padding: 1px 6px;
+            font-size: 10px;
+            cursor: pointer;
+        }
+
         .seg-body::-webkit-scrollbar { width: 4px; }
         .seg-body::-webkit-scrollbar-track { background: transparent; }
         .seg-body::-webkit-scrollbar-thumb { background: var(--border-color); border-radius: 3px; }
@@ -1153,6 +1205,15 @@
             <aside class="sidebar">
                 <div class="sidebar-section logs-section">
                     <div class="sidebar-title">otslog output</div>
+                    <div class="export-progress" id="globalExportProgress">
+                        <div class="export-progress-head">
+                            <span id="globalExportProgressText">preparing export…</span>
+                            <button class="export-cancel-btn" id="globalExportCancel" type="button">cancel</button>
+                        </div>
+                        <div class="export-progress-track">
+                            <div class="export-progress-fill" id="globalExportProgressFill"></div>
+                        </div>
+                    </div>
                     <div class="system-box collapsed" id="systemBox">
                         <button class="system-box-toggle" id="systemBoxToggle" type="button">
                             <span>system messages</span>
@@ -1203,6 +1264,11 @@
             var systemToggle = document.getElementById("systemBoxToggle");
             var tabBtnActive  = document.getElementById("tabBtnActive");
             var tabBtnHistory = document.getElementById("tabBtnHistory");
+            var globalExportProgress = document.getElementById("globalExportProgress");
+            var globalExportProgressText = document.getElementById("globalExportProgressText");
+            var globalExportProgressFill = document.getElementById("globalExportProgressFill");
+            var globalExportCancel = document.getElementById("globalExportCancel");
+            var activeExportJobId = null;
 
             systemToggle.addEventListener("click", function () {
                 systemBox.classList.toggle("collapsed");
@@ -1219,6 +1285,20 @@
                 tabBtnActive.classList.remove("active");
                 paneHistory.classList.add("active");
                 paneActive.classList.remove("active");
+            });
+
+            globalExportCancel.addEventListener("click", function () {
+                if (!activeExportJobId) return;
+                fetch("/api/extract-zip/jobs/" + encodeURIComponent(activeExportJobId), {
+                    method: "DELETE"
+                }).then(function () {
+                    globalExportProgressText.textContent = "cancelled";
+                    globalExportProgressFill.style.width = "0%";
+                    setTimeout(function () {
+                        globalExportProgress.classList.remove("active");
+                    }, 800);
+                    activeExportJobId = null;
+                });
             });
 
             function cameraIdFromSegment(name) {
@@ -1242,6 +1322,7 @@
                     initPlayer(streamUrl);
                 }
                 applyCameraFilter();
+                loadStampsFromDb();
                 var url = new URL(window.location.href);
                 url.searchParams.set("cam", activeCameraId.replace("cam", ""));
                 window.history.replaceState({}, "", url);
@@ -1472,7 +1553,9 @@
                 seg.extracting = true;
                 seg.el.classList.add("extracting");
                 if (rowEl) rowEl.classList.add("extracting");
-                log("[" + segmentName + "] extracting offset=" + offset + " …", "info");
+                globalExportProgress.classList.add("active");
+                globalExportProgressText.textContent = segmentName + " · queued 0%";
+                globalExportProgressFill.style.width = "0%";
 
                 fetch("/api/extract-zip", {
                     method: "POST",
@@ -1485,34 +1568,93 @@
                 .then(function (response) {
                     if (!response.ok) {
                         return response.json().catch(function () {
-                            return { error: "extract failed: HTTP " + response.status };
+                            return { error: "export failed: HTTP " + response.status };
                         }).then(function (data) {
-                            throw new Error(data.error || ("extract failed: HTTP " + response.status));
+                            throw new Error(data.error || ("export failed: HTTP " + response.status));
                         });
                     }
+                    return response.json();
+                })
+                .then(function (data) {
+                    if (!data.job_id) {
+                        throw new Error("missing job id from export response");
+                    }
 
-                    var disposition = response.headers.get("Content-Disposition") || "";
-                    var match = disposition.match(/filename="?([^";]+)"?/i);
-                    var downloadName = match && match[1] ? match[1] : (segmentName + ".zip");
+                    var jobId = data.job_id;
+                    activeExportJobId = jobId;
+                    var poll = function () {
+                        return fetch("/api/extract-zip/jobs/" + encodeURIComponent(jobId))
+                            .then(function (statusResponse) {
+                                if (!statusResponse.ok) {
+                                    return statusResponse.json().catch(function () {
+                                        return { error: "job status failed: HTTP " + statusResponse.status };
+                                    }).then(function (statusData) {
+                                        throw new Error(statusData.error || ("job status failed: HTTP " + statusResponse.status));
+                                    });
+                                }
+                                return statusResponse.json();
+                            })
+                            .then(function (statusData) {
+                                if (typeof statusData.progress === "number") {
+                                    var p = Math.max(0, Math.min(100, statusData.progress));
+                                    globalExportProgressText.textContent = segmentName + " · " + statusData.status + " " + p + "%";
+                                    globalExportProgressFill.style.width = p + "%";
+                                }
 
-                    return response.blob().then(function (blob) {
-                        var url = URL.createObjectURL(blob);
-                        var a = document.createElement("a");
-                        a.href = url;
-                        a.download = downloadName;
-                        document.body.appendChild(a);
-                        a.click();
-                        a.remove();
-                        URL.revokeObjectURL(url);
-                        log("[" + segmentName + "] zip downloaded", "success");
-                    });
+                                if (statusData.status === "done") {
+                                    if (!statusData.download_url) {
+                                        throw new Error("export finished without download URL");
+                                    }
+                                    var downloadFrame = document.createElement("iframe");
+                                    downloadFrame.style.display = "none";
+                                    downloadFrame.src = statusData.download_url;
+                                    document.body.appendChild(downloadFrame);
+                                    setTimeout(function () {
+                                        if (downloadFrame.parentNode) downloadFrame.parentNode.removeChild(downloadFrame);
+                                    }, 60000);
+                                    globalExportProgressText.textContent = segmentName + " · ready";
+                                    globalExportProgressFill.style.width = "100%";
+                                    setTimeout(function () {
+                                        if (activeExportJobId === jobId) {
+                                            globalExportProgress.classList.remove("active");
+                                        }
+                                    }, 1500);
+                                    log("[" + segmentName + "] download started", "success");
+                                    return;
+                                }
+
+                                if (statusData.status === "cancelled") {
+                                    globalExportProgressText.textContent = segmentName + " · cancelled";
+                                    globalExportProgressFill.style.width = "0%";
+                                    setTimeout(function () {
+                                        if (activeExportJobId === jobId) {
+                                            globalExportProgress.classList.remove("active");
+                                        }
+                                    }, 800);
+                                    return;
+                                }
+
+                                if (statusData.status === "failed") {
+                                    throw new Error(statusData.error || "export failed");
+                                }
+
+                                return new Promise(function (resolve) {
+                                    setTimeout(resolve, 1200);
+                                }).then(poll);
+                            });
+                    };
+
+                    return poll();
                 })
                 .catch(function (error) {
                     var msg = error && error.message ? error.message : String(error);
-                    log("[" + segmentName + "] extract error: " + msg, "error");
+                    globalExportProgressText.textContent = segmentName + " · failed";
+                    globalExportProgressFill.style.width = "0%";
+                    log("[" + segmentName + "] export error: " + msg, "error");
                 })
                 .finally(function () {
                     seg.extracting = false;
+                    activeExportJobId = null;
                     seg.el.classList.remove("extracting");
                     if (rowEl) rowEl.classList.remove("extracting");
                 });

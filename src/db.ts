@@ -26,6 +26,25 @@ db.exec(`
 
   CREATE INDEX IF NOT EXISTS idx_stamps_segment ON stamps(segment_name);
   CREATE INDEX IF NOT EXISTS idx_stamps_time ON stamps(time);
+
+  CREATE TABLE IF NOT EXISTS export_jobs (
+    id TEXT PRIMARY KEY,
+    segment_name TEXT NOT NULL,
+    offset INTEGER NOT NULL,
+    status TEXT NOT NULL,
+    progress INTEGER NOT NULL DEFAULT 0,
+    error TEXT,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+    completed_at INTEGER,
+    zip_name TEXT NOT NULL,
+    zip_path TEXT,
+    s3_key TEXT,
+    download_url TEXT,
+    download_url_expires_at INTEGER
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_export_jobs_updated ON export_jobs(updated_at);
 `);
 
 export interface Stamp {
@@ -46,6 +65,23 @@ export interface Segment {
   completed: number;
   created_at?: string;
   updated_at?: string;
+}
+
+export interface ExportJobRecord {
+  id: string;
+  segment_name: string;
+  offset: number;
+  status: string;
+  progress: number;
+  error: string | null;
+  created_at: number;
+  updated_at: number;
+  completed_at: number | null;
+  zip_name: string;
+  zip_path: string | null;
+  s3_key: string | null;
+  download_url: string | null;
+  download_url_expires_at: number | null;
 }
 
 export function saveStamp(stamp: Stamp): void {
@@ -137,7 +173,61 @@ export function markSegmentCompleted(name: string): void {
   stmt.run({ $name: name });
 }
 
+export function saveExportJob(job: ExportJobRecord): void {
+  const stmt = db.prepare(`
+    INSERT OR REPLACE INTO export_jobs (
+      id, segment_name, offset, status, progress, error,
+      created_at, updated_at, completed_at,
+      zip_name, zip_path, s3_key, download_url, download_url_expires_at
+    ) VALUES (
+      $id, $segment_name, $offset, $status, $progress, $error,
+      $created_at, $updated_at, $completed_at,
+      $zip_name, $zip_path, $s3_key, $download_url, $download_url_expires_at
+    )
+  `);
+
+  stmt.run({
+    $id: job.id,
+    $segment_name: job.segment_name,
+    $offset: job.offset,
+    $status: job.status,
+    $progress: job.progress,
+    $error: job.error,
+    $created_at: job.created_at,
+    $updated_at: job.updated_at,
+    $completed_at: job.completed_at,
+    $zip_name: job.zip_name,
+    $zip_path: job.zip_path,
+    $s3_key: job.s3_key,
+    $download_url: job.download_url,
+    $download_url_expires_at: job.download_url_expires_at,
+  });
+}
+
+export function getExportJob(id: string): ExportJobRecord | null {
+  const stmt = db.prepare(`SELECT * FROM export_jobs WHERE id = $id LIMIT 1`);
+  return (stmt.get({ $id: id }) as ExportJobRecord | null) ?? null;
+}
+
+export function getRecentExportJobs(limit = 200): ExportJobRecord[] {
+  const stmt = db.prepare(`
+    SELECT * FROM export_jobs ORDER BY updated_at DESC LIMIT $limit
+  `);
+  return stmt.all({ $limit: limit }) as ExportJobRecord[];
+}
+
+export function deleteExportJob(id: string): void {
+  const stmt = db.prepare(`DELETE FROM export_jobs WHERE id = $id`);
+  stmt.run({ $id: id });
+}
+
+export function deleteOldExportJobs(olderThanEpochMs: number): void {
+  const stmt = db.prepare(`DELETE FROM export_jobs WHERE updated_at < $ts`);
+  stmt.run({ $ts: olderThanEpochMs });
+}
+
 export function clearDb(): void {
   db.exec("DELETE FROM stamps");
   db.exec("DELETE FROM segments");
+  db.exec("DELETE FROM export_jobs");
 }

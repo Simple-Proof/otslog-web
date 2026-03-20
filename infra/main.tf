@@ -9,14 +9,20 @@ terraform {
 }
 
 provider "aws" {
-  region  = "us-west-2"
-  profile = "dev"
+  region  = "us-east-2"
+  profile = "pro"
+}
+
+provider "aws" {
+  alias   = "use1"
+  region  = "us-east-1"
+  profile = "pro"
 }
 
 # ── Variables ────────────────────────────────────────────────────────────────
 
 variable "domain" {
-  default = "rtsp.simpleproof.xyz"
+  default = "rolling.simpleproof.com"
 }
 
 variable "instance_type" {
@@ -24,8 +30,8 @@ variable "instance_type" {
 }
 
 variable "ami" {
-  # Amazon Linux 2023 x86_64 us-west-2 (2026-02)
-  default = "ami-075b5421f670d735c"
+  # Amazon Linux 2023 x86_64 us-east-2 (2026-02)
+  default = "ami-075a156f1500285e1"
 }
 
 variable "github_repo" {
@@ -33,21 +39,30 @@ variable "github_repo" {
   default     = "Simple-Proof/otslog-web"
 }
 
+variable "s3_export_bucket" {
+  description = "S3 bucket for async export ZIP artifacts"
+  type        = string
+  default     = ""
+}
+
+variable "s3_export_prefix" {
+  description = "S3 key prefix for async export ZIP artifacts"
+  type        = string
+  default     = "exports"
+}
+
 # ── Data sources ─────────────────────────────────────────────────────────────
 
 data "aws_vpc" "default" {
-  default = true
+  id = "vpc-07119cc6da38ccfc0"
 }
 
-data "aws_subnets" "default" {
-  filter {
-    name   = "vpc-id"
-    values = [data.aws_vpc.default.id]
-  }
+locals {
+  subnet_ids = ["subnet-004ebf8b9d1b4158d", "subnet-03553b6e4f8c3c188"]
 }
 
 data "aws_route53_zone" "simpleproof" {
-  name         = "simpleproof.xyz."
+  name         = "simpleproof.com."
   private_zone = false
 }
 
@@ -90,6 +105,42 @@ resource "aws_route53_record" "cert_validation" {
 resource "aws_acm_certificate_validation" "otslog" {
   certificate_arn         = aws_acm_certificate.otslog.arn
   validation_record_fqdns = [for record in aws_route53_record.cert_validation : record.fqdn]
+}
+
+resource "aws_acm_certificate" "cloudfront" {
+  provider          = aws.use1
+  domain_name       = var.domain
+  validation_method = "DNS"
+
+  lifecycle {
+    create_before_destroy = true
+  }
+
+  tags = { Name = "otslog-web-cloudfront" }
+}
+
+resource "aws_route53_record" "cloudfront_cert_validation" {
+  allow_overwrite = true
+
+  for_each = {
+    for dvo in aws_acm_certificate.cloudfront.domain_validation_options : dvo.domain_name => {
+      name   = dvo.resource_record_name
+      record = dvo.resource_record_value
+      type   = dvo.resource_record_type
+    }
+  }
+
+  zone_id = data.aws_route53_zone.simpleproof.zone_id
+  name    = each.value.name
+  type    = each.value.type
+  ttl     = 60
+  records = [each.value.record]
+}
+
+resource "aws_acm_certificate_validation" "cloudfront" {
+  provider                = aws.use1
+  certificate_arn         = aws_acm_certificate.cloudfront.arn
+  validation_record_fqdns = [for record in aws_route53_record.cloudfront_cert_validation : record.fqdn]
 }
 
 # ── Security Groups ─────────────────────────────────────────────────────────
@@ -163,7 +214,7 @@ resource "aws_lb" "otslog" {
   internal           = false
   load_balancer_type = "application"
   security_groups    = [aws_security_group.alb.id]
-  subnets            = data.aws_subnets.default.ids
+  subnets            = local.subnet_ids
 
   tags = { Name = "otslog-web" }
 }
@@ -211,13 +262,64 @@ resource "aws_lb_listener" "http" {
   protocol          = "HTTP"
 
   default_action {
-    type = "redirect"
-    redirect {
-      port        = "443"
-      protocol    = "HTTPS"
-      status_code = "HTTP_301"
+    type             = "forward"
+    target_group_arn = aws_lb_target_group.otslog.arn
+  }
+}
+
+data "aws_cloudfront_cache_policy" "caching_disabled" {
+  name = "Managed-CachingDisabled"
+}
+
+data "aws_cloudfront_origin_request_policy" "all_viewer" {
+  name = "Managed-AllViewerExceptHostHeader"
+}
+
+resource "aws_cloudfront_distribution" "otslog" {
+  enabled             = true
+  is_ipv6_enabled     = true
+  comment             = "otslog-web"
+  default_root_object = ""
+  aliases             = [var.domain]
+
+  origin {
+    domain_name = aws_lb.otslog.dns_name
+    origin_id   = "alb-otslog"
+
+    custom_origin_config {
+      http_port              = 80
+      https_port             = 443
+      origin_protocol_policy = "http-only"
+      origin_ssl_protocols   = ["TLSv1.2"]
     }
   }
+
+  default_cache_behavior {
+    target_origin_id       = "alb-otslog"
+    viewer_protocol_policy = "redirect-to-https"
+    allowed_methods        = ["GET", "HEAD", "OPTIONS", "PUT", "POST", "PATCH", "DELETE"]
+    cached_methods         = ["GET", "HEAD"]
+    compress               = true
+
+    cache_policy_id          = data.aws_cloudfront_cache_policy.caching_disabled.id
+    origin_request_policy_id = data.aws_cloudfront_origin_request_policy.all_viewer.id
+  }
+
+  restrictions {
+    geo_restriction {
+      restriction_type = "none"
+    }
+  }
+
+  viewer_certificate {
+    acm_certificate_arn      = aws_acm_certificate_validation.cloudfront.certificate_arn
+    ssl_support_method       = "sni-only"
+    minimum_protocol_version = "TLSv1.2_2021"
+  }
+
+  depends_on = [aws_acm_certificate_validation.cloudfront]
+
+  tags = { Name = "otslog-web" }
 }
 
 # ── ECR ──────────────────────────────────────────────────────────────────────
@@ -276,6 +378,42 @@ resource "aws_iam_role_policy_attachment" "ec2_ecr" {
 resource "aws_iam_role_policy_attachment" "ec2_ssm" {
   role       = aws_iam_role.ec2.name
   policy_arn = "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"
+}
+
+resource "aws_iam_role_policy" "ec2_s3_exports" {
+  count = var.s3_export_bucket != "" ? 1 : 0
+
+  name = "s3-export-access"
+  role = aws_iam_role.ec2.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect = "Allow"
+        Action = [
+          "s3:ListBucket"
+        ]
+        Resource = "arn:aws:s3:::${var.s3_export_bucket}"
+        Condition = {
+          StringLike = {
+            "s3:prefix" = [
+              "${var.s3_export_prefix}/*"
+            ]
+          }
+        }
+      },
+      {
+        Effect = "Allow"
+        Action = [
+          "s3:PutObject",
+          "s3:GetObject",
+          "s3:AbortMultipartUpload"
+        ]
+        Resource = "arn:aws:s3:::${var.s3_export_bucket}/${var.s3_export_prefix}/*"
+      }
+    ]
+  })
 }
 
 resource "aws_iam_instance_profile" "ec2" {
@@ -355,6 +493,7 @@ resource "aws_instance" "otslog" {
   ami                    = var.ami
   instance_type          = var.instance_type
   key_name               = aws_key_pair.otslog.key_name
+  subnet_id              = local.subnet_ids[0]
   vpc_security_group_ids = [aws_security_group.ec2.id]
   iam_instance_profile   = aws_iam_instance_profile.ec2.name
 
@@ -399,9 +538,9 @@ resource "aws_route53_record" "rtsp" {
   type    = "A"
 
   alias {
-    name                   = aws_lb.otslog.dns_name
-    zone_id                = aws_lb.otslog.zone_id
-    evaluate_target_health = true
+    name                   = aws_cloudfront_distribution.otslog.domain_name
+    zone_id                = aws_cloudfront_distribution.otslog.hosted_zone_id
+    evaluate_target_health = false
   }
 }
 
@@ -415,6 +554,11 @@ output "public_ip" {
 output "alb_dns" {
   description = "ALB DNS name"
   value       = aws_lb.otslog.dns_name
+}
+
+output "cloudfront_dns" {
+  description = "CloudFront DNS name"
+  value       = aws_cloudfront_distribution.otslog.domain_name
 }
 
 output "ecr_registry" {

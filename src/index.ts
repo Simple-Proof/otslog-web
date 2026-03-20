@@ -3,11 +3,14 @@ import { createBunWebSocket } from "hono/bun";
 import type { WSContext } from "hono/ws";
 import { parseArgs } from "node:util";
 import { resolve, dirname, basename, join, extname } from "node:path";
+import { randomUUID } from "node:crypto";
+import { S3Client, PutObjectCommand, GetObjectCommand } from "@aws-sdk/client-s3";
+import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import { list, extract } from "./otslog.ts";
 import { startFfmpeg, isFfmpegRunning } from "./ffmpeg.ts";
 import type { FfmpegProcess } from "./ffmpeg.ts";
 import { SegmentWatcher } from "./segment-watcher.ts";
-import { saveStamp, getAllStamps, getStampsBySegment, saveSegment, markSegmentStamping, markSegmentCompleted, getSegments, clearDb, getStampCounts } from "./db.ts";
+import { saveStamp, getAllStamps, getStampsBySegment, saveSegment, markSegmentStamping, markSegmentCompleted, getSegments, clearDb, getStampCounts, saveExportJob, getExportJob, getRecentExportJobs, deleteOldExportJobs, type ExportJobRecord } from "./db.ts";
 
 // ---------------------------------------------------------------------------
 // CLI arguments
@@ -108,6 +111,78 @@ interface ZipEntry {
 const textEncoder = new TextEncoder();
 const SEGMENT_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._-]*\.mp4$/;
 const MAX_ZIP_BYTES = 200 * 1024 * 1024;
+const EXPORT_JOB_TTL_MS = 60 * 60 * 1000;
+const EXPORT_URL_TTL_SECONDS = 60 * 30;
+const exportDir = join(segmentDir, ".exports");
+
+type ExportJobStatus = "queued" | "running" | "uploading" | "done" | "failed" | "cancelled";
+
+interface ExportJob {
+  id: string;
+  segmentName: string;
+  offset: number;
+  status: ExportJobStatus;
+  progress: number;
+  error: string | null;
+  createdAt: number;
+  updatedAt: number;
+  completedAt: number | null;
+  zipName: string;
+  zipPath: string | null;
+  s3Key: string | null;
+  downloadUrl: string | null;
+  downloadUrlExpiresAt: number | null;
+}
+
+const exportJobs = new Map<string, ExportJob>();
+const exportAbortControllers = new Map<string, AbortController>();
+
+const exportBucket = process.env["S3_EXPORT_BUCKET"]?.trim();
+const exportPrefix = process.env["S3_EXPORT_PREFIX"]?.trim() || "exports";
+const awsRegion = process.env["AWS_REGION"]?.trim() || process.env["AWS_DEFAULT_REGION"]?.trim() || "us-east-2";
+const s3Client = exportBucket ? new S3Client({ region: awsRegion }) : null;
+
+function toExportJobRecord(job: ExportJob): ExportJobRecord {
+  return {
+    id: job.id,
+    segment_name: job.segmentName,
+    offset: job.offset,
+    status: job.status,
+    progress: job.progress,
+    error: job.error,
+    created_at: job.createdAt,
+    updated_at: job.updatedAt,
+    completed_at: job.completedAt,
+    zip_name: job.zipName,
+    zip_path: job.zipPath,
+    s3_key: job.s3Key,
+    download_url: job.downloadUrl,
+    download_url_expires_at: job.downloadUrlExpiresAt,
+  };
+}
+
+function fromExportJobRecord(record: ExportJobRecord): ExportJob {
+  return {
+    id: record.id,
+    segmentName: record.segment_name,
+    offset: record.offset,
+    status: record.status as ExportJobStatus,
+    progress: record.progress,
+    error: record.error,
+    createdAt: record.created_at,
+    updatedAt: record.updated_at,
+    completedAt: record.completed_at,
+    zipName: record.zip_name,
+    zipPath: record.zip_path,
+    s3Key: record.s3_key,
+    downloadUrl: record.download_url,
+    downloadUrlExpiresAt: record.download_url_expires_at,
+  };
+}
+
+function persistExportJob(job: ExportJob): void {
+  saveExportJob(toExportJobRecord(job));
+}
 
 function isPrimarySegmentName(filename: string): boolean {
   if (/\[\d+\]\.mp4$/i.test(filename)) return false;
@@ -243,6 +318,269 @@ function buildStoredZip(entries: ZipEntry[]): Uint8Array {
   const allParts = [...localParts, ...centralParts, endRecord];
   const totalLength = localOffset + centralSize + endRecord.length;
   return concatBytes(allParts, totalLength);
+}
+
+function sanitizeZipName(segmentName: string, offset: number): string {
+  return `${segmentName}.${offset}.zip`.replace(/[\r\n"]/g, "_");
+}
+
+function pruneOldExportJobs(now: number): void {
+  const cutoff = now - EXPORT_JOB_TTL_MS;
+  deleteOldExportJobs(cutoff);
+
+  for (const [id, job] of exportJobs.entries()) {
+    if ((job.status === "done" || job.status === "failed" || job.status === "cancelled") && now - job.updatedAt > EXPORT_JOB_TTL_MS) {
+      if (job.zipPath) {
+        const zipPath = job.zipPath;
+        void Bun.file(zipPath).exists().then((exists) => {
+          if (exists) return Bun.file(zipPath).delete();
+        }).catch(() => {});
+      }
+      exportAbortControllers.delete(id);
+      exportJobs.delete(id);
+    }
+  }
+}
+
+function ensureSegmentPath(segmentName: string): string {
+  const segmentCamera = findCameraBySegmentName(segmentName);
+  if (!segmentCamera || !SEGMENT_NAME_RE.test(segmentName)) {
+    throw new Error("Invalid segment_name");
+  }
+  if (segmentName.includes("/") || segmentName.includes("\\") || segmentName.includes("..")) {
+    throw new Error("Invalid segment_name");
+  }
+
+  const srcPath = join(segmentDir, segmentName);
+  const resolvedSrcPath = resolve(srcPath);
+  if (!resolvedSrcPath.startsWith(segmentDir + "/")) {
+    throw new Error("Forbidden: path outside allowed directory");
+  }
+  return resolvedSrcPath;
+}
+
+async function resolveExtractOutputs(resolvedSrcPath: string, offset: number): Promise<{ truncatedResolved: string; otsResolved: string }> {
+  if (!otslogBin) {
+    throw new Error("otslog-bin not configured");
+  }
+
+  let extractResult: { truncatedPath: string; otsPath: string };
+  try {
+    extractResult = await extract({
+      bin: otslogBin,
+      srcPath: resolvedSrcPath,
+      offset,
+    });
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : String(error);
+    if (msg.includes("already exists") || msg.includes("File exists")) {
+      const candidates = extractOutputCandidates(resolvedSrcPath, offset);
+      let found: { truncatedPath: string; otsPath: string } | null = null;
+      for (const candidate of candidates) {
+        const exists = await Bun.file(candidate.truncatedPath).exists() && await Bun.file(candidate.otsPath).exists();
+        if (exists) {
+          found = candidate;
+          break;
+        }
+      }
+      if (!found) {
+        throw new Error("Extract output files already exist but could not be resolved");
+      }
+      extractResult = found;
+    } else {
+      throw error;
+    }
+  }
+
+  const truncatedResolved = resolve(extractResult.truncatedPath);
+  const otsResolved = resolve(extractResult.otsPath);
+  if (!truncatedResolved.startsWith(segmentDir + "/") || !otsResolved.startsWith(segmentDir + "/")) {
+    throw new Error("Forbidden: output outside allowed directory");
+  }
+
+  const truncatedFile = Bun.file(truncatedResolved);
+  const otsFile = Bun.file(otsResolved);
+  if (!await truncatedFile.exists() || !await otsFile.exists()) {
+    throw new Error("Extract output files not found");
+  }
+
+  return { truncatedResolved, otsResolved };
+}
+
+async function buildZipBytesFromOutputs(truncatedResolved: string, otsResolved: string): Promise<Uint8Array> {
+  const truncatedData = new Uint8Array(await Bun.file(truncatedResolved).arrayBuffer());
+  const otsData = new Uint8Array(await Bun.file(otsResolved).arrayBuffer());
+
+  const combinedSize = truncatedData.byteLength + otsData.byteLength;
+  if (combinedSize > MAX_ZIP_BYTES) {
+    throw new Error(`ZIP exceeds max size (${MAX_ZIP_BYTES} bytes)`);
+  }
+
+  return buildStoredZip([
+    { name: basename(truncatedResolved), data: truncatedData },
+    { name: basename(otsResolved), data: otsData },
+  ]);
+}
+
+async function ensureJobDownloadUrl(job: ExportJob): Promise<void> {
+  if (job.status !== "done") return;
+  const now = Date.now();
+  if (job.downloadUrl && job.downloadUrlExpiresAt && job.downloadUrlExpiresAt - now > 30_000) return;
+
+  if (s3Client && exportBucket && job.s3Key) {
+    const command = new GetObjectCommand({
+      Bucket: exportBucket,
+      Key: job.s3Key,
+      ResponseContentType: "application/zip",
+      ResponseContentDisposition: `attachment; filename="${job.zipName}"`,
+    });
+    const signed = await getSignedUrl(s3Client, command, { expiresIn: EXPORT_URL_TTL_SECONDS });
+    job.downloadUrl = signed;
+    job.downloadUrlExpiresAt = now + EXPORT_URL_TTL_SECONDS * 1000;
+  } else {
+    job.downloadUrl = `/api/extract-zip/jobs/${job.id}/download`;
+    job.downloadUrlExpiresAt = null;
+  }
+  job.updatedAt = now;
+  persistExportJob(job);
+}
+
+function assertNotCancelled(job: ExportJob, abortSignal: AbortSignal): void {
+  if (abortSignal.aborted || job.status === "cancelled") {
+    throw new Error("job cancelled");
+  }
+}
+
+async function processExportJob(job: ExportJob): Promise<void> {
+  const abortController = new AbortController();
+  exportAbortControllers.set(job.id, abortController);
+
+  try {
+    job.status = "running";
+    job.progress = 10;
+    job.updatedAt = Date.now();
+    persistExportJob(job);
+    assertNotCancelled(job, abortController.signal);
+
+    const resolvedSrcPath = ensureSegmentPath(job.segmentName);
+    const srcFile = Bun.file(resolvedSrcPath);
+    if (!await srcFile.exists()) throw new Error("Segment not found");
+    const srcSize = srcFile.size;
+    if (!Number.isFinite(srcSize) || srcSize <= 0) throw new Error("Segment is empty or unavailable");
+    if (job.offset > srcSize) throw new Error(`offset exceeds segment size (${srcSize})`);
+    assertNotCancelled(job, abortController.signal);
+
+    const { truncatedResolved, otsResolved } = await resolveExtractOutputs(resolvedSrcPath, job.offset);
+    job.progress = 55;
+    job.updatedAt = Date.now();
+    persistExportJob(job);
+    assertNotCancelled(job, abortController.signal);
+
+    const zipBytes = await buildZipBytesFromOutputs(truncatedResolved, otsResolved);
+    job.progress = 75;
+    job.updatedAt = Date.now();
+    persistExportJob(job);
+    assertNotCancelled(job, abortController.signal);
+
+    if (s3Client && exportBucket) {
+      job.status = "uploading";
+      job.updatedAt = Date.now();
+      persistExportJob(job);
+      const s3Key = `${exportPrefix}/${job.id}/${job.zipName}`;
+      await s3Client.send(new PutObjectCommand({
+        Bucket: exportBucket,
+        Key: s3Key,
+        Body: zipBytes,
+        ContentType: "application/zip",
+        ContentDisposition: `attachment; filename="${job.zipName}"`,
+      }));
+      job.s3Key = s3Key;
+      job.zipPath = null;
+    } else {
+      await Bun.write(job.zipPath!, zipBytes);
+      job.s3Key = null;
+    }
+    assertNotCancelled(job, abortController.signal);
+
+    job.status = "done";
+    job.progress = 100;
+    job.completedAt = Date.now();
+    job.error = null;
+    job.updatedAt = Date.now();
+    persistExportJob(job);
+    await ensureJobDownloadUrl(job);
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : String(error);
+    if (msg === "job cancelled") {
+      job.status = "cancelled";
+      job.error = null;
+      if (job.zipPath) {
+        const zipPath = job.zipPath;
+        void Bun.file(job.zipPath).exists().then((exists) => {
+          if (exists) return Bun.file(zipPath).delete();
+        }).catch(() => {});
+      }
+    } else {
+      job.status = "failed";
+      job.error = msg;
+    }
+    job.updatedAt = Date.now();
+    job.completedAt = Date.now();
+    persistExportJob(job);
+  } finally {
+    exportAbortControllers.delete(job.id);
+  }
+}
+
+function createExportJob(segmentName: string, offset: number): ExportJob {
+  const now = Date.now();
+  pruneOldExportJobs(now);
+
+  if (!Number.isSafeInteger(offset) || offset < 0) {
+    throw new Error("offset must be a non-negative number");
+  }
+
+  const id = randomUUID();
+  const zipName = sanitizeZipName(segmentName, offset);
+  const zipPath = join(exportDir, `${id}.zip`);
+  const job: ExportJob = {
+    id,
+    segmentName,
+    offset,
+    status: "queued",
+    progress: 0,
+    error: null,
+    createdAt: now,
+    updatedAt: now,
+    completedAt: null,
+    zipName,
+    zipPath,
+    s3Key: null,
+    downloadUrl: null,
+    downloadUrlExpiresAt: null,
+  };
+
+  exportJobs.set(id, job);
+  persistExportJob(job);
+  void processExportJob(job);
+  return job;
+}
+
+function hydrateExportJobsFromDb(): void {
+  const now = Date.now();
+  const rows = getRecentExportJobs(300);
+  for (const row of rows) {
+    const job = fromExportJobRecord(row);
+    if (job.status === "queued" || job.status === "running" || job.status === "uploading") {
+      job.status = "failed";
+      job.error = "interrupted by server restart";
+      job.updatedAt = now;
+      job.completedAt = now;
+      persistExportJob(job);
+    }
+    exportJobs.set(job.id, job);
+  }
+  pruneOldExportJobs(now);
 }
 
 // ---------------------------------------------------------------------------
@@ -480,106 +818,112 @@ app.post("/api/extract-zip", async (c) => {
   if (!otslogBin) return c.json({ error: "otslog-bin not configured" }, 500);
   if (!body.segment_name) return c.json({ error: "segment_name is required" }, 400);
   if (body.offset === undefined) return c.json({ error: "offset is required" }, 400);
-
-  const segmentName = body.segment_name;
-  const offset = Number(body.offset);
-
-  const segmentCamera = findCameraBySegmentName(segmentName);
-  if (!segmentCamera || !SEGMENT_NAME_RE.test(segmentName)) {
-    return c.json({ error: "Invalid segment_name" }, 400);
-  }
-  if (segmentName.includes("/") || segmentName.includes("\\") || segmentName.includes("..")) {
-    return c.json({ error: "Invalid segment_name" }, 400);
-  }
-  if (!Number.isSafeInteger(offset) || offset < 0) {
-    return c.json({ error: "offset must be a non-negative number" }, 400);
-  }
-
-  const srcPath = join(segmentDir, segmentName);
-  const resolvedSrcPath = resolve(srcPath);
-  if (!resolvedSrcPath.startsWith(segmentDir + "/")) {
-    return c.json({ error: "Forbidden: path outside allowed directory" }, 403);
-  }
-
-  const srcFile = Bun.file(resolvedSrcPath);
-  if (!await srcFile.exists()) {
-    return c.json({ error: "Segment not found" }, 404);
-  }
-
-  const srcSize = srcFile.size;
-  if (!Number.isFinite(srcSize) || srcSize <= 0) {
-    return c.json({ error: "Segment is empty or unavailable" }, 422);
-  }
-  if (offset > srcSize) {
-    return c.json({ error: `offset exceeds segment size (${srcSize})` }, 422);
-  }
-
-  let extractResult: { truncatedPath: string; otsPath: string };
   try {
-    extractResult = await extract({
-      bin: otslogBin,
-      srcPath: resolvedSrcPath,
-      offset,
-    });
+    const job = createExportJob(body.segment_name, Number(body.offset));
+    return c.json({
+      job_id: job.id,
+      status: job.status,
+      progress: job.progress,
+    }, 202);
   } catch (error) {
     const msg = error instanceof Error ? error.message : String(error);
-    if (msg.includes("already exists") || msg.includes("File exists")) {
-      const candidates = extractOutputCandidates(resolvedSrcPath, offset);
-      let found: { truncatedPath: string; otsPath: string } | null = null;
-      for (const candidate of candidates) {
-        const exists = await Bun.file(candidate.truncatedPath).exists()
-          && await Bun.file(candidate.otsPath).exists();
-        if (exists) {
-          found = candidate;
-          break;
-        }
-      }
-
-      if (!found) {
-        return c.json({ error: "Extract output files already exist but could not be resolved" }, 409);
-      }
-      extractResult = found;
-    } else {
-      return c.json({ error: msg }, 500);
+    if (msg.includes("Invalid segment_name") || msg.includes("offset")) {
+      return c.json({ error: msg }, 400);
     }
+    return c.json({ error: msg }, 500);
+  }
+});
+
+app.get("/api/extract-zip/jobs/:id", async (c) => {
+  const id = c.req.param("id");
+  const job = exportJobs.get(id) ?? (() => {
+    const row = getExportJob(id);
+    if (!row) return null;
+    const loaded = fromExportJobRecord(row);
+    exportJobs.set(id, loaded);
+    return loaded;
+  })();
+  if (!job) return c.json({ error: "job not found" }, 404);
+
+  await ensureJobDownloadUrl(job);
+
+  return c.json({
+    job_id: job.id,
+    segment_name: job.segmentName,
+    offset: job.offset,
+    status: job.status,
+    progress: job.progress,
+    error: job.error,
+    download_url: job.status === "done" ? job.downloadUrl : null,
+    created_at: job.createdAt,
+    updated_at: job.updatedAt,
+    completed_at: job.completedAt,
+  });
+});
+
+app.get("/api/extract-zip/jobs/:id/download", async (c) => {
+  const id = c.req.param("id");
+  const job = exportJobs.get(id) ?? (() => {
+    const row = getExportJob(id);
+    if (!row) return null;
+    const loaded = fromExportJobRecord(row);
+    exportJobs.set(id, loaded);
+    return loaded;
+  })();
+  if (!job) return c.json({ error: "job not found" }, 404);
+  if (job.status === "cancelled") return c.json({ error: "job cancelled" }, 409);
+  if (job.status !== "done") return c.json({ error: "job not ready" }, 409);
+
+  if (job.zipPath) {
+    const file = Bun.file(job.zipPath);
+    if (!await file.exists()) {
+      return c.json({ error: "artifact not found" }, 404);
+    }
+    return c.body(await file.arrayBuffer(), {
+      headers: {
+        "Content-Type": "application/zip",
+        "Content-Disposition": `attachment; filename="${job.zipName}"`,
+      },
+    });
   }
 
-  const truncatedResolved = resolve(extractResult.truncatedPath);
-  const otsResolved = resolve(extractResult.otsPath);
-  if (!truncatedResolved.startsWith(segmentDir + "/") || !otsResolved.startsWith(segmentDir + "/")) {
-    return c.json({ error: "Forbidden: output outside allowed directory" }, 403);
+  await ensureJobDownloadUrl(job);
+  if (!job.downloadUrl) return c.json({ error: "download URL unavailable" }, 500);
+  return c.redirect(job.downloadUrl, 302);
+});
+
+app.delete("/api/extract-zip/jobs/:id", async (c) => {
+  const id = c.req.param("id");
+  const job = exportJobs.get(id) ?? (() => {
+    const row = getExportJob(id);
+    if (!row) return null;
+    const loaded = fromExportJobRecord(row);
+    exportJobs.set(id, loaded);
+    return loaded;
+  })();
+  if (!job) return c.json({ error: "job not found" }, 404);
+
+  if (job.status === "done" || job.status === "failed" || job.status === "cancelled") {
+    return c.json({
+      job_id: job.id,
+      status: job.status,
+      progress: job.progress,
+      already_finished: true,
+    });
   }
 
-  const truncatedFile = Bun.file(truncatedResolved);
-  const otsFile = Bun.file(otsResolved);
+  const controller = exportAbortControllers.get(job.id);
+  if (controller) controller.abort();
+  job.status = "cancelled";
+  job.error = null;
+  job.completedAt = Date.now();
+  job.updatedAt = Date.now();
+  persistExportJob(job);
 
-  if (!await truncatedFile.exists() || !await otsFile.exists()) {
-    return c.json({ error: "Extract output files not found" }, 500);
-  }
-
-  const truncatedData = new Uint8Array(await truncatedFile.arrayBuffer());
-  const otsData = new Uint8Array(await otsFile.arrayBuffer());
-
-  const combinedSize = truncatedData.byteLength + otsData.byteLength;
-  if (combinedSize > MAX_ZIP_BYTES) {
-    return c.json({ error: `ZIP exceeds max size (${MAX_ZIP_BYTES} bytes)` }, 413);
-  }
-
-  const zipBytes = buildStoredZip([
-    { name: basename(truncatedResolved), data: truncatedData },
-    { name: basename(otsResolved), data: otsData },
-  ]);
-
-  const zipName = `${segmentName}.${offset}.zip`.replace(/[\r\n"]/g, "_");
-  const zipBuffer = new ArrayBuffer(zipBytes.byteLength);
-  new Uint8Array(zipBuffer).set(zipBytes);
-
-  return c.body(zipBuffer, {
-    headers: {
-      "Content-Type": "application/zip",
-      "Content-Disposition": `attachment; filename="${zipName}"`,
-      "Content-Length": String(zipBytes.byteLength),
-    },
+  return c.json({
+    job_id: job.id,
+    status: job.status,
+    progress: job.progress,
   });
 });
 
@@ -839,11 +1183,19 @@ function autoStartWatcher() {
   }
 }
 
+async function ensureRuntimeDirs() {
+  const { mkdir } = await import("node:fs/promises");
+  await mkdir(segmentDir, { recursive: true });
+  await mkdir(exportDir, { recursive: true });
+}
+
 // ---------------------------------------------------------------------------
 // Boot sequence
 // ---------------------------------------------------------------------------
 
 if (clean) await cleanArtifacts();
+await ensureRuntimeDirs();
+hydrateExportJobsFromDb();
 await autoStartFfmpeg();
 autoStartWatcher();
 

@@ -151,6 +151,7 @@ export async function startFfmpeg(opts: FfmpegOpts): Promise<FfmpegProcess> {
       // Guard against tight crash loops — if ffmpeg died too quickly, wait
       const lifetime = Date.now() - startTime;
       if (lifetime < MIN_LIFETIME_MS) {
+        if (counter > 0) counter--;
         console.log(`[ffmpeg] process exited after ${lifetime}ms — waiting before restart`);
         await new Promise((r) => setTimeout(r, MIN_LIFETIME_MS - lifetime));
       }

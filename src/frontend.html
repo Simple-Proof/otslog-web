@@ -1612,13 +1612,9 @@
                                     setTimeout(function () {
                                         if (downloadFrame.parentNode) downloadFrame.parentNode.removeChild(downloadFrame);
                                     }, 60000);
-                                    globalExportProgressText.textContent = segmentName + " · ready";
-                                    globalExportProgressFill.style.width = "100%";
-                                    setTimeout(function () {
-                                        if (activeExportJobId === jobId) {
-                                            globalExportProgress.classList.remove("active");
-                                        }
-                                    }, 1500);
+                                    globalExportProgress.classList.remove("active");
+                                    globalExportProgressText.textContent = "preparing export…";
+                                    globalExportProgressFill.style.width = "0%";
                                     log("[" + segmentName + "] download started", "success");
                                     return;
                                 }

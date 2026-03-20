@@ -12,16 +12,14 @@
     <meta name="author" content="SimpleProof">
     <meta name="robots" content="index, follow">
     <link rel="canonical" href="https://rolling.simpleproof.com/">
-    <link rel="icon" type="image/png" sizes="32x32" href="/favicon.png">
-    <link rel="icon" type="image/png" sizes="16x16" href="/favicon.png">
-    <link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png">
+    <link rel="icon" type="image/svg+xml" sizes="any" href="https://assets.simpleproof.com/brand/ico/favicon.svg">
     
     <!-- Open Graph / Facebook -->
     <meta property="og:type" content="website">
     <meta property="og:url" content="https://rolling.simpleproof.com/">
     <meta property="og:title" content="otslog — Live Viewer">
     <meta property="og:description" content="Live video streaming with OpenTimestamps immutable proof. Monitor your cameras with real-time timestamping and verification.">
-    <meta property="og:image" content="https://rolling.simpleproof.com/og-image.webp">
+    <meta property="og:image" content="https://assets.simpleproof.com/rich-snippets/v1/og_rolling.webp">
     <meta property="og:image:width" content="1200">
     <meta property="og:image:height" content="630">
     <meta property="og:image:type" content="image/webp">
@@ -32,7 +30,7 @@
     <meta name="twitter:url" content="https://rolling.simpleproof.com/">
     <meta name="twitter:title" content="otslog — Live Viewer">
     <meta name="twitter:description" content="Live video streaming with OpenTimestamps immutable proof. Monitor your cameras with real-time timestamping and verification.">
-    <meta name="twitter:image" content="https://rolling.simpleproof.com/og-image.webp">
+    <meta name="twitter:image" content="https://assets.simpleproof.com/rich-snippets/v1/og_rolling.webp">
     <style>
         *, *::before, *::after {
             margin: 0;
@@ -400,6 +398,11 @@
         .seg-group.extracting .seg-header {
             opacity: 0.65;
             cursor: wait;
+        }
+
+        .seg-group.loading-stamps .seg-header {
+            opacity: 0.75;
+            cursor: progress;
         }
 
         .seg-group.extracting .seg-header-left::after {
@@ -1285,6 +1288,7 @@
             }
 
             function loadStampsFromDb() {
+                var camId = activeCameraId;
                 return fetch("/api/segments-sql")
                     .then(function (response) {
                         if (!response.ok) return { segments: [] };
@@ -1293,34 +1297,80 @@
                     .then(function (data) {
                         if (!data.segments || !data.segments.length) return;
                         data.segments.forEach(function (segData) {
-                            if (segments[segData.name]) return;
+                            if (segments[segData.name]) {
+                                if (segData.completed && segments[segData.name].el.parentNode !== paneHistory) {
+                                    segments[segData.name].el.classList.add("completed");
+                                    paneHistory.prepend(segments[segData.name].el);
+                                }
+                                return;
+                            }
+                            var segCamId = segData.camera_id || segData.name.split("_")[0];
+                            if (segCamId !== camId) return;
                             var seg = getOrCreateSegment(segData.name);
+                            if (!seg) return;
                             if (segData.completed) {
                                 seg.el.classList.add("completed");
+                                paneHistory.prepend(seg.el);
                             }
                         });
                     })
                     .then(function () {
-                        return fetch("/api/stamps");
+                        return fetch("/api/stamp-counts?camera=" + encodeURIComponent(camId));
                     })
                     .then(function (response) {
-                        if (!response.ok) return { stamps: [] };
+                        if (!response.ok) return { counts: [] };
                         return response.json();
                     })
                     .then(function (data) {
-                        if (!data.stamps || !data.stamps.length) return;
-                        data.stamps.forEach(function (stamp) {
-                            var seg = segments[stamp.segment_name];
+                        if (!data.counts || !data.counts.length) return;
+                        data.counts.forEach(function (row) {
+                            var seg = segments[row.segment_name];
                             if (seg) {
-                                seg.count++;
-                                addStamp(seg, stamp.offset, stamp.time, stamp.midstate);
+                                seg.count = row.stamps;
+                                seg.countEl.textContent = row.stamps + (row.stamps === 1 ? " stamp" : " stamps");
                             }
                         });
                     });
             }
 
+            function loadSegmentStamps(seg) {
+                if (!seg || seg.stampsLoaded || seg.loadingStamps) return;
+                seg.loadingStamps = true;
+                seg.el.classList.add("loading-stamps");
+
+                fetch("/api/stamps?segment=" + encodeURIComponent(seg.name))
+                    .then(function (response) {
+                        if (!response.ok) return { stamps: [] };
+                        return response.json();
+                    })
+                    .then(function (data) {
+                        if (!data.stamps || !data.stamps.length) {
+                            seg.stampsLoaded = true;
+                            return;
+                        }
+                        data.stamps.forEach(function (stamp) {
+                            addStamp(seg, stamp.offset, stamp.time, stamp.midstate, true);
+                        });
+                        seg.stampsLoaded = true;
+                    })
+                    .finally(function () {
+                        seg.loadingStamps = false;
+                        seg.el.classList.remove("loading-stamps");
+                    });
+            }
+
             function getOrCreateSegment(name) {
                 if (segments[name]) return segments[name];
+
+                // Only create segment if it matches active camera
+                if (activeCameraId) {
+                    var segCamPrefix = name.split("_")[0]; // "cam01" from "cam01_output_000.mp4"
+                    // Normalize: activeCameraId could be "cam01" or "cam1"
+                    var activeNorm = activeCameraId.replace(/^cam0/, "cam");
+                    if (segCamPrefix !== activeCameraId && segCamPrefix !== activeNorm) {
+                        return null;
+                    }
+                }
 
                 var group = document.createElement("div");
                 group.className = "seg-group";
@@ -1384,6 +1434,9 @@
                 chevron.addEventListener("click", function (e) {
                     e.stopPropagation();
                     group.classList.toggle("collapsed");
+                    if (!group.classList.contains("collapsed")) {
+                        loadSegmentStamps(segmentState);
+                    }
                 });
 
                 var segmentState = {
@@ -1395,11 +1448,16 @@
                     rawSection: rawSection,
                     rawLines: rawLines,
                     count: 0,
-                    extracting: false
+                    extracting: false,
+                    loadingStamps: false,
+                    stampsLoaded: false
                 };
 
                 header.addEventListener("click", function () {
                     group.classList.toggle("collapsed");
+                    if (!group.classList.contains("collapsed")) {
+                        loadSegmentStamps(segmentState);
+                    }
                 });
 
                 paneActive.prepend(group);
@@ -1485,14 +1543,20 @@
                 }
             }
 
-            function addStamp(seg, offset, unixTime, midstate) {
+            function addStamp(seg, offset, unixTime, midstate, keepCount) {
                 var offsetNum = parseInt(offset, 10);
-                if (seg.count === 0 && offsetNum === 28) {
+                if (!keepCount && seg.count === 0 && offsetNum === 28) {
                     return;
                 }
 
-                seg.count++;
-                seg.countEl.textContent = seg.count + (seg.count === 1 ? " stamp" : " stamps");
+                if (seg.bodyEl.querySelector('.stamp-row[data-offset="' + String(offset) + '"]')) {
+                    return;
+                }
+
+                if (!keepCount) {
+                    seg.count++;
+                    seg.countEl.textContent = seg.count + (seg.count === 1 ? " stamp" : " stamps");
+                }
 
                 var d = new Date(unixTime * 1000);
                 var hh = String(d.getHours()).padStart(2, "0");
@@ -1503,6 +1567,7 @@
 
                 var row = document.createElement("div");
                 row.className = "stamp-row";
+                row.dataset.offset = String(offset);
                 row.innerHTML =
                     "<span class='stamp-icon'>✓</span>" +
                     "<span class='stamp-time'>" + timeStr + "</span>" +
@@ -1542,6 +1607,9 @@
                     var segName = segMatch[1];
                     var rest = segMatch[2];
                     var seg = getOrCreateSegment(segName);
+
+                    // Skip if segment belongs to another camera
+                    if (!seg) return;
 
                     // Try to parse Stamped line
                     var stampMatch = rest.match(/^Stamped\s+offset=(\d+)\s+time=(\d+)\s+midstate=([0-9a-f]+)/i);

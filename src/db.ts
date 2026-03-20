@@ -75,6 +75,32 @@ export function getAllStamps(limit = 100): Stamp[] {
   return stmt.all({ $limit: limit }) as Stamp[];
 }
 
+export interface StampCount {
+  segment_name: string;
+  stamps: number;
+}
+
+export function getStampCounts(cameraId?: string): StampCount[] {
+  if (cameraId) {
+    const stmt = db.prepare(`
+      SELECT segment_name, COUNT(*) AS stamps
+      FROM stamps
+      WHERE segment_name LIKE $prefix
+      GROUP BY segment_name
+      ORDER BY segment_name DESC
+    `);
+    return stmt.all({ $prefix: `${cameraId}_output_%` }) as StampCount[];
+  }
+
+  const stmt = db.prepare(`
+    SELECT segment_name, COUNT(*) AS stamps
+    FROM stamps
+    GROUP BY segment_name
+    ORDER BY segment_name DESC
+  `);
+  return stmt.all() as StampCount[];
+}
+
 export function saveSegment(segment: Partial<Segment> & { name: string }): void {
   const stmt = db.prepare(`
     INSERT OR REPLACE INTO segments (name, camera_id, size, mtime, stamping, completed, updated_at)

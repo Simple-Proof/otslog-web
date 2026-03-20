@@ -7,7 +7,7 @@ import { list, extract } from "./otslog.ts";
 import { startFfmpeg, isFfmpegRunning } from "./ffmpeg.ts";
 import type { FfmpegProcess } from "./ffmpeg.ts";
 import { SegmentWatcher } from "./segment-watcher.ts";
-import { saveStamp, getAllStamps, getStampsBySegment, saveSegment, markSegmentStamping, markSegmentCompleted, getSegments, clearDb } from "./db.ts";
+import { saveStamp, getAllStamps, getStampsBySegment, saveSegment, markSegmentStamping, markSegmentCompleted, getSegments, clearDb, getStampCounts } from "./db.ts";
 
 // ---------------------------------------------------------------------------
 // CLI arguments
@@ -629,14 +629,20 @@ app.get("/api/status", (c) => {
 
 app.get("/api/stamps", (c) => {
   const segment = c.req.query("segment");
+  const limit = parseInt(c.req.query("limit") || "1000", 10);
   if (segment) {
     return c.json({ stamps: getStampsBySegment(segment) });
   }
-  return c.json({ stamps: getAllStamps() });
+  return c.json({ stamps: getAllStamps(limit) });
 });
 
 app.get("/api/segments-sql", (c) => {
   return c.json({ segments: getSegments() });
+});
+
+app.get("/api/stamp-counts", (c) => {
+  const camera = c.req.query("camera");
+  return c.json({ counts: getStampCounts(camera || undefined) });
 });
 
 app.get("/api/cameras", (c) => {

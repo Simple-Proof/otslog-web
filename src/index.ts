@@ -10,7 +10,7 @@ import { list, extract } from "./otslog.ts";
 import { startFfmpeg, isFfmpegRunning } from "./ffmpeg.ts";
 import type { FfmpegProcess } from "./ffmpeg.ts";
 import { SegmentWatcher } from "./segment-watcher.ts";
-import { saveStamp, getAllStamps, getStampsBySegment, saveSegment, getSegments, clearDb, getStampCounts, saveExportJob, getExportJob, getRecentExportJobs, deleteOldExportJobs, type ExportJobRecord } from "./db.ts";
+import { saveStamp, getAllStamps, getStampsBySegment, saveSegment, getSegments, clearDb, getStampCounts, saveExportJob, getExportJob, getRecentExportJobs, deleteOldExportJobs, deleteSegmentData, type ExportJobRecord } from "./db.ts";
 
 // ---------------------------------------------------------------------------
 // CLI arguments
@@ -114,6 +114,32 @@ const MAX_ZIP_BYTES = 200 * 1024 * 1024;
 const EXPORT_JOB_TTL_MS = 60 * 60 * 1000;
 const EXPORT_URL_TTL_SECONDS = 60 * 30;
 const exportDir = join(segmentDir, ".exports");
+const segmentRetentionHours = Math.max(1, parseInt(process.env["SEGMENT_RETENTION_HOURS"] ?? "24", 10) || 24);
+const segmentCleanupIntervalSeconds = Math.max(60, parseInt(process.env["SEGMENT_CLEANUP_INTERVAL_SECONDS"] ?? "900", 10) || 900);
+
+interface RetentionStats {
+  enabled: boolean;
+  retentionHours: number;
+  intervalSeconds: number;
+  lastRunAt: number | null;
+  lastError: string | null;
+  lastPrunedSegments: number;
+  lastOrphanDbDeletes: number;
+  totalPrunedSegments: number;
+  totalOrphanDbDeletes: number;
+}
+
+const retentionStats: RetentionStats = {
+  enabled: false,
+  retentionHours: segmentRetentionHours,
+  intervalSeconds: segmentCleanupIntervalSeconds,
+  lastRunAt: null,
+  lastError: null,
+  lastPrunedSegments: 0,
+  lastOrphanDbDeletes: 0,
+  totalPrunedSegments: 0,
+  totalOrphanDbDeletes: 0,
+};
 
 type ExportJobStatus = "queued" | "running" | "uploading" | "done" | "failed" | "cancelled";
 
@@ -963,6 +989,7 @@ app.get("/api/status", (c) => {
     stamping: allActiveSegments(),
     clients: stampClients.size,
     segmentDir,
+    retention: retentionStats,
     cameras: cameras.map((camera) => ({
       id: camera.id,
       name: camera.name,
@@ -1079,6 +1106,101 @@ async function cleanArtifacts() {
   console.log("[clean] clearing database...");
   clearDb();
   console.log("[clean] done");
+}
+
+async function pruneOldSegmentsAndDb(): Promise<{ prunedSegments: number; orphanDbDeletes: number }> {
+  const { readdir, stat, rm } = await import("node:fs/promises");
+
+  const files = await readdir(segmentDir).catch(() => [] as string[]);
+  const filesSet = new Set(files);
+  const active = new Set(allActiveSegments());
+  const now = Date.now();
+  const retentionMs = segmentRetentionHours * 60 * 60 * 1000;
+  let prunedSegments = 0;
+  let orphanDbDeletes = 0;
+
+  for (const file of files) {
+    if (!isPrimarySegmentName(file)) continue;
+    if (active.has(file)) continue;
+
+    const fullPath = join(segmentDir, file);
+    const s = await stat(fullPath).catch(() => null);
+    if (!s) continue;
+
+    const ageMs = now - s.mtimeMs;
+    if (ageMs < retentionMs) continue;
+
+    const base = file.replace(/\.mp4$/i, "");
+    const related = files.filter((entry) => {
+      if (entry === file) return true;
+      if (entry === `${file}.otslog`) return true;
+      if (entry.startsWith(`${base}[`)) return true;
+      return false;
+    });
+
+    let deletionFailed = false;
+
+    for (const entry of related) {
+      const target = join(segmentDir, entry);
+      try {
+        await rm(target, { force: true, recursive: true });
+      } catch (error) {
+        deletionFailed = true;
+        console.error(`[retention] failed to remove ${entry}:`, error);
+      }
+      filesSet.delete(entry);
+    }
+
+    if (deletionFailed) {
+      console.warn(`[retention] skipped DB delete for ${file} because one or more files failed to delete`);
+      continue;
+    }
+
+    deleteSegmentData(file);
+    prunedSegments += 1;
+    console.log(`[retention] pruned ${file} (${Math.round(ageMs / 1000)}s old)`);
+  }
+
+  for (const seg of getSegments()) {
+    if (!filesSet.has(seg.name)) {
+      deleteSegmentData(seg.name);
+      orphanDbDeletes += 1;
+    }
+  }
+
+  return { prunedSegments, orphanDbDeletes };
+}
+
+function startSegmentRetentionCleaner() {
+  retentionStats.enabled = true;
+
+  const run = async () => {
+    try {
+      const result = await pruneOldSegmentsAndDb();
+      retentionStats.lastRunAt = Date.now();
+      retentionStats.lastError = null;
+      retentionStats.lastPrunedSegments = result.prunedSegments;
+      retentionStats.lastOrphanDbDeletes = result.orphanDbDeletes;
+      retentionStats.totalPrunedSegments += result.prunedSegments;
+      retentionStats.totalOrphanDbDeletes += result.orphanDbDeletes;
+
+      if (result.prunedSegments > 0 || result.orphanDbDeletes > 0) {
+        console.log(`[retention] run complete: pruned=${result.prunedSegments}, orphan_db_deleted=${result.orphanDbDeletes}`);
+      }
+    } catch (error) {
+      retentionStats.lastRunAt = Date.now();
+      retentionStats.lastError = error instanceof Error ? error.message : String(error);
+      console.error("[retention] prune failed:", error);
+    }
+  };
+
+  void run();
+  const timer = setInterval(() => {
+    void run();
+  }, segmentCleanupIntervalSeconds * 1000);
+  timer.unref?.();
+
+  console.log(`[retention] enabled (older than ${segmentRetentionHours}h, interval ${segmentCleanupIntervalSeconds}s)`);
 }
 
 // ---------------------------------------------------------------------------
@@ -1209,6 +1331,7 @@ await ensureRuntimeDirs();
 hydrateExportJobsFromDb();
 await autoStartFfmpeg();
 autoStartWatcher();
+startSegmentRetentionCleaner();
 
 // ---------------------------------------------------------------------------
 // Export for Bun

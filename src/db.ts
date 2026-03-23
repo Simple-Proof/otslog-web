@@ -228,6 +228,14 @@ export function deleteOldExportJobs(olderThanEpochMs: number): void {
   stmt.run({ $ts: olderThanEpochMs });
 }
 
+export function deleteSegmentData(segmentName: string): void {
+  const deleteStamps = db.prepare(`DELETE FROM stamps WHERE segment_name = $segment_name`);
+  deleteStamps.run({ $segment_name: segmentName });
+
+  const deleteSegment = db.prepare(`DELETE FROM segments WHERE name = $name`);
+  deleteSegment.run({ $name: segmentName });
+}
+
 export function clearDb(): void {
   db.exec("DELETE FROM stamps");
   db.exec("DELETE FROM segments");

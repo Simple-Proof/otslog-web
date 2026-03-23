@@ -1272,6 +1272,9 @@
             var globalExportProgressFill = document.getElementById("globalExportProgressFill");
             var globalExportCancel = document.getElementById("globalExportCancel");
             var activeExportJobId = null;
+            var openHistorySegment = null;
+            var openActiveSegment = null;
+            var primaryActiveSegment = null;
 
             systemToggle.addEventListener("click", function () {
                 systemBox.classList.toggle("collapsed");
@@ -1384,6 +1387,7 @@
                             if (segments[segData.name]) {
                                 if (segData.completed && segments[segData.name].el.parentNode !== paneHistory) {
                                     segments[segData.name].el.classList.add("completed");
+                                    segments[segData.name].el.classList.add("collapsed");
                                     paneHistory.prepend(segments[segData.name].el);
                                 }
                                 return;
@@ -1394,6 +1398,7 @@
                             if (!seg) return;
                             if (segData.completed) {
                                 seg.el.classList.add("completed");
+                                seg.el.classList.add("collapsed");
                                 paneHistory.prepend(seg.el);
                             }
                         });
@@ -1466,6 +1471,64 @@
                         seg.loadingStamps = false;
                         seg.el.classList.remove("loading-stamps");
                     });
+            }
+
+            function setHistoryAccordion(seg, expand) {
+                if (!seg) return;
+
+                var isInHistory = seg.el.parentNode === paneHistory;
+                if (!isInHistory) {
+                    if (expand) seg.el.classList.remove("collapsed");
+                    else seg.el.classList.add("collapsed");
+                    return;
+                }
+
+                if (expand) {
+                    if (openHistorySegment && openHistorySegment !== seg) {
+                        openHistorySegment.el.classList.add("collapsed");
+                    }
+                    seg.el.classList.remove("collapsed");
+                    openHistorySegment = seg;
+                    loadSegmentStamps(seg);
+                    return;
+                }
+
+                seg.el.classList.add("collapsed");
+                if (openHistorySegment === seg) {
+                    openHistorySegment = null;
+                }
+            }
+
+            function setActiveAccordion(seg, expand) {
+                if (!seg) return;
+
+                var isInActive = seg.el.parentNode === paneActive;
+                if (!isInActive) {
+                    if (expand) seg.el.classList.remove("collapsed");
+                    else seg.el.classList.add("collapsed");
+                    return;
+                }
+
+                if (expand) {
+                    if (openActiveSegment && openActiveSegment !== seg) {
+                        openActiveSegment.el.classList.add("collapsed");
+                    }
+                    seg.el.classList.remove("collapsed");
+                    openActiveSegment = seg;
+                    loadSegmentStamps(seg);
+                    return;
+                }
+
+                if (primaryActiveSegment === seg) {
+                    seg.el.classList.remove("collapsed");
+                    openActiveSegment = seg;
+                    return;
+                }
+
+                seg.el.classList.add("collapsed");
+                if (openActiveSegment === seg) {
+                    openActiveSegment = null;
+                }
             }
 
             function getOrCreateSegment(name) {
@@ -1542,10 +1605,18 @@
 
                 chevron.addEventListener("click", function (e) {
                     e.stopPropagation();
-                    group.classList.toggle("collapsed");
-                    if (!group.classList.contains("collapsed")) {
-                        loadSegmentStamps(segmentState);
+                    var nextExpanded = group.classList.contains("collapsed");
+                    if (group.parentNode === paneHistory) {
+                        setHistoryAccordion(segmentState, nextExpanded);
+                        return;
                     }
+                    if (group.parentNode === paneActive) {
+                        setActiveAccordion(segmentState, nextExpanded);
+                        return;
+                    }
+
+                    group.classList.toggle("collapsed");
+                    if (!group.classList.contains("collapsed")) loadSegmentStamps(segmentState);
                 });
 
                 var segmentState = {
@@ -1563,10 +1634,18 @@
                 };
 
                 header.addEventListener("click", function () {
-                    group.classList.toggle("collapsed");
-                    if (!group.classList.contains("collapsed")) {
-                        loadSegmentStamps(segmentState);
+                    var nextExpanded = group.classList.contains("collapsed");
+                    if (group.parentNode === paneHistory) {
+                        setHistoryAccordion(segmentState, nextExpanded);
+                        return;
                     }
+                    if (group.parentNode === paneActive) {
+                        setActiveAccordion(segmentState, nextExpanded);
+                        return;
+                    }
+
+                    group.classList.toggle("collapsed");
+                    if (!group.classList.contains("collapsed")) loadSegmentStamps(segmentState);
                 });
 
                 paneActive.prepend(group);
@@ -1703,16 +1782,23 @@
                     // Move to history pane, collapsed
                     seg.el.classList.add("collapsed");
                     paneHistory.insertBefore(seg.el, paneHistory.firstChild); // newest at top
+                    if (openHistorySegment === seg) {
+                        openHistorySegment = null;
+                    }
+                    if (openActiveSegment === seg) {
+                        openActiveSegment = null;
+                    }
+                    if (primaryActiveSegment === seg) {
+                        primaryActiveSegment = null;
+                    }
                 } else if (statusWord === "started") {
-                    // Ensure it's in active pane, expanded
-                    paneActive.appendChild(seg.el);
-                    seg.el.classList.remove("collapsed");
-                    // Collapse any other leftover cards in active pane
-                    Object.keys(segments).forEach(function (k) {
-                        if (segments[k] !== seg && segments[k].el.parentNode === paneActive) {
-                            segments[k].el.classList.add("collapsed");
-                        }
-                    });
+                    // Ensure it's in active pane, expanded as the primary current segment
+                    primaryActiveSegment = seg;
+                    paneActive.insertBefore(seg.el, paneActive.firstChild);
+                    setActiveAccordion(seg, true);
+                    if (openHistorySegment === seg) {
+                        openHistorySegment = null;
+                    }
                 }
             }
 

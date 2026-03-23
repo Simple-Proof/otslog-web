@@ -6,6 +6,9 @@ services:
     ports:
       - "3777:3777"
     environment:
+      - AWS_REGION=${AWS_REGION:-us-east-2}
+      - S3_EXPORT_BUCKET=${S3_EXPORT_BUCKET}
+      - S3_EXPORT_PREFIX=${S3_EXPORT_PREFIX:-exports}
       - CAMERAS=${CAMERAS}
       - CAM01_NAME=${CAM01_NAME}
       - CAM01_HLS_URL=${CAM01_HLS_URL}

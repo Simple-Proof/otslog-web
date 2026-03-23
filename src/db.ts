@@ -122,6 +122,7 @@ export function getStampCounts(cameraId?: string): StampCount[] {
       SELECT segment_name, COUNT(*) AS stamps
       FROM stamps
       WHERE segment_name LIKE $prefix
+        AND offset > 100
       GROUP BY segment_name
       ORDER BY segment_name DESC
     `);
@@ -131,6 +132,7 @@ export function getStampCounts(cameraId?: string): StampCount[] {
   const stmt = db.prepare(`
     SELECT segment_name, COUNT(*) AS stamps
     FROM stamps
+    WHERE offset > 100
     GROUP BY segment_name
     ORDER BY segment_name DESC
   `);

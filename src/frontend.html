@@ -728,7 +728,10 @@
         }
 
         .tab-pane.active {
-            display: block;
+            display: flex;
+            flex: 1;
+            min-height: 0;
+            flex-direction: column;
             overflow-y: auto;
             overscroll-behavior: contain;
         }
@@ -1396,6 +1399,31 @@
                         });
                     })
                     .then(function () {
+                        return fetch("/api/segments");
+                    })
+                    .then(function (response) {
+                        if (!response.ok) return { segments: [] };
+                        return response.json();
+                    })
+                    .then(function (data) {
+                        if (!data.segments || !data.segments.length) return;
+                        data.segments.forEach(function (segData) {
+                            if (!segData.name || !segData.name.endsWith(".mp4")) return;
+                            var segCamId = segData.cameraId || segData.camera_id || segData.name.split("_")[0];
+                            if (segCamId !== camId) return;
+                            var seg = getOrCreateSegment(segData.name);
+                            if (!seg) return;
+
+                            if (segData.stamping) {
+                                seg.el.classList.remove("completed");
+                                if (seg.el.parentNode !== paneActive) {
+                                    paneActive.prepend(seg.el);
+                                }
+                                addStatus(seg, "started");
+                            }
+                        });
+                    })
+                    .then(function () {
                         return fetch("/api/stamp-counts?camera=" + encodeURIComponent(camId));
                     })
                     .then(function (response) {
@@ -1657,6 +1685,13 @@
             }
 
             function addStatus(seg, statusWord) {
+                if (statusWord === "started") {
+                    var staleDone = seg.badgesEl.querySelector(".seg-badge.done");
+                    if (staleDone) staleDone.remove();
+                    var staleError = seg.badgesEl.querySelector(".seg-badge.error");
+                    if (staleError) staleError.remove();
+                }
+
                 var existing = seg.badgesEl.querySelector(".seg-badge." + statusWord);
                 if (existing) return;
                 var badge = document.createElement("span");
@@ -1683,7 +1718,7 @@
 
             function addStamp(seg, offset, unixTime, midstate, keepCount) {
                 var offsetNum = parseInt(offset, 10);
-                if (!keepCount && seg.count === 0 && offsetNum === 28) {
+                if (offsetNum <= 100) {
                     return;
                 }
 
@@ -1706,6 +1741,7 @@
                 var row = document.createElement("div");
                 row.className = "stamp-row";
                 row.dataset.offset = String(offset);
+                row.dataset.unixTime = String(unixTime);
                 row.innerHTML =
                     "<span class='stamp-icon'>✓</span>" +
                     "<span class='stamp-time'>" + timeStr + "</span>" +
@@ -1722,11 +1758,25 @@
                     extractSegmentZip(seg.name, clickOffset, seg, row);
                 });
 
-                // Insert before raw section
-                seg.bodyEl.insertBefore(row, seg.rawSection);
-                // Auto-scroll only if user is near bottom (within 50px)
                 var isNearBottom = seg.bodyEl.scrollHeight - seg.bodyEl.scrollTop - seg.bodyEl.clientHeight < 50;
-                if (isNearBottom) {
+
+                var inserted = false;
+                var existingRows = seg.bodyEl.querySelectorAll(".stamp-row");
+                for (var i = 0; i < existingRows.length; i++) {
+                    var existingUnixTime = parseInt(existingRows[i].dataset.unixTime || "0", 10);
+                    if (unixTime < existingUnixTime) {
+                        seg.bodyEl.insertBefore(row, existingRows[i]);
+                        inserted = true;
+                        break;
+                    }
+                }
+
+                if (!inserted) {
+                    seg.bodyEl.insertBefore(row, seg.rawSection);
+                }
+
+                // Auto-scroll only if user is near bottom and insertion appended at the end.
+                if (isNearBottom && !inserted) {
                     seg.bodyEl.scrollTop = seg.bodyEl.scrollHeight;
                 }
             }

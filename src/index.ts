@@ -10,7 +10,7 @@ import { list, extract } from "./otslog.ts";
 import { startFfmpeg, isFfmpegRunning } from "./ffmpeg.ts";
 import type { FfmpegProcess } from "./ffmpeg.ts";
 import { SegmentWatcher } from "./segment-watcher.ts";
-import { saveStamp, getAllStamps, getStampsBySegment, saveSegment, markSegmentStamping, markSegmentCompleted, getSegments, clearDb, getStampCounts, saveExportJob, getExportJob, getRecentExportJobs, deleteOldExportJobs, type ExportJobRecord } from "./db.ts";
+import { saveStamp, getAllStamps, getStampsBySegment, saveSegment, getSegments, clearDb, getStampCounts, saveExportJob, getExportJob, getRecentExportJobs, deleteOldExportJobs, type ExportJobRecord } from "./db.ts";
 
 // ---------------------------------------------------------------------------
 // CLI arguments
@@ -185,6 +185,7 @@ function persistExportJob(job: ExportJob): void {
 }
 
 function isPrimarySegmentName(filename: string): boolean {
+  if (!filename.endsWith(".mp4")) return false;
   if (/\[\d+\]\.mp4$/i.test(filename)) return false;
   if (cameras.length === 0) return filename.startsWith(segmentPrefix);
   return cameras.some((camera) => filename.startsWith(camera.segmentPrefix));
@@ -1170,9 +1171,19 @@ function autoStartWatcher() {
         broadcastStatus(segment, msg);
 
         if (status === "started") {
-          markSegmentStamping(segName, true);
+          saveSegment({
+            name: segName,
+            camera_id: camera.id,
+            stamping: 1,
+            completed: 0,
+          });
         } else if (status === "done") {
-          markSegmentCompleted(segName);
+          saveSegment({
+            name: segName,
+            camera_id: camera.id,
+            stamping: 0,
+            completed: 1,
+          });
         }
       },
     });

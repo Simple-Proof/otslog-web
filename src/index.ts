@@ -116,6 +116,8 @@ const EXPORT_URL_TTL_SECONDS = 60 * 30;
 const exportDir = join(segmentDir, ".exports");
 const segmentRetentionHours = Math.max(1, parseInt(process.env["SEGMENT_RETENTION_HOURS"] ?? "24", 10) || 24);
 const segmentCleanupIntervalSeconds = Math.max(60, parseInt(process.env["SEGMENT_CLEANUP_INTERVAL_SECONDS"] ?? "900", 10) || 900);
+const stampTimeoutSeconds = Math.max(5, parseInt(process.env["STAMP_TIMEOUT_SECONDS"] ?? "30", 10) || 30);
+const stampMinAttestations = Math.max(1, parseInt(process.env["STAMP_MIN_ATTESTATIONS"] ?? "1", 10) || 1);
 
 interface RetentionStats {
   enabled: boolean;
@@ -1270,6 +1272,8 @@ function autoStartWatcher() {
       otslogBin,
       followInterval,
       idleTimeout,
+      timeoutSeconds: stampTimeoutSeconds,
+      minAttestations: stampMinAttestations,
       onLine: (segment, line) => {
         const segName = basename(segment)!;
         console.log(`[otslog:${camera.id}:${segName}] ${line}`);
@@ -1312,7 +1316,7 @@ function autoStartWatcher() {
 
     watcher.start();
     watchers.set(camera.id, watcher);
-    console.log(`[boot] segment watcher started for ${camera.id} (${segmentDir}/${camera.segmentPrefix}*.mp4, follow=${followInterval}s, idle-timeout=${idleTimeout}s)`);
+    console.log(`[boot] segment watcher started for ${camera.id} (${segmentDir}/${camera.segmentPrefix}*.mp4, follow=${followInterval}s, idle-timeout=${idleTimeout}s, timeout=${stampTimeoutSeconds}s, min-attestations=${stampMinAttestations})`);
   }
 }
 

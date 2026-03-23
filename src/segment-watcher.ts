@@ -2,6 +2,7 @@ import type { Subprocess } from "bun";
 import { watch } from "node:fs";
 import { resolve, basename } from "node:path";
 import { splitLines } from "./line-splitter.ts";
+import { list } from "./otslog.ts";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -22,6 +23,8 @@ export interface SegmentWatcherOpts {
    * Default: 30s (a bit more than one segment duration's worth of padding).
    */
   idleTimeout?: number;
+  timeoutSeconds?: number;
+  minAttestations?: number;
   /** Called for every line of otslog output (for broadcasting) */
   onLine: (segment: string, line: string) => void;
   /** Called when a segment's stamp process starts or stops */
@@ -43,6 +46,9 @@ export class SegmentWatcher {
   private active = new Map<string, Subprocess>();
   /** segments we've already started stamping (avoid double-spawn) */
   private seen = new Set<string>();
+  private retryAttempts = new Map<string, number>();
+  private retrying = new Set<string>();
+  private retryTimers = new Map<string, ReturnType<typeof setTimeout>>();
   private fsWatcher: ReturnType<typeof watch> | null = null;
   private stopped = false;
 
@@ -79,6 +85,11 @@ export class SegmentWatcher {
       proc.kill();
     }
     this.active.clear();
+    for (const timer of this.retryTimers.values()) {
+      clearTimeout(timer);
+    }
+    this.retryTimers.clear();
+    this.retrying.clear();
   }
 
   /** Kill stamp for a specific segment (if active) */
@@ -88,11 +99,18 @@ export class SegmentWatcher {
       proc.kill();
       this.active.delete(segmentName);
     }
+    const retryTimer = this.retryTimers.get(segmentName);
+    if (retryTimer) {
+      clearTimeout(retryTimer);
+      this.retryTimers.delete(segmentName);
+    }
+    this.retryAttempts.delete(segmentName);
+    this.retrying.delete(segmentName);
   }
 
   /** List of segments currently being stamped */
   activeSegments(): string[] {
-    return [...this.active.keys()];
+    return [...new Set([...this.active.keys(), ...this.retrying])];
   }
 
   // ---------------------------------------------------------------------------
@@ -148,7 +166,7 @@ export class SegmentWatcher {
   }
 
   private spawnStamp(fullPath: string, filename: string) {
-    const { otslogBin, followInterval, idleTimeout = 30 } = this.opts;
+    const { otslogBin, followInterval, idleTimeout = 30, timeoutSeconds, minAttestations } = this.opts;
 
     const args = [
       "stamp",
@@ -157,6 +175,14 @@ export class SegmentWatcher {
       "--idle-timeout", String(idleTimeout),
     ];
 
+    if (typeof timeoutSeconds === "number" && Number.isFinite(timeoutSeconds) && timeoutSeconds > 0) {
+      args.push("--timeout", String(timeoutSeconds));
+    }
+
+    if (typeof minAttestations === "number" && Number.isFinite(minAttestations) && minAttestations > 0) {
+      args.push("-m", String(minAttestations));
+    }
+
     console.log(`[watcher] stamping ${filename}: ${otslogBin} ${args.join(" ")}`);
 
     const proc = Bun.spawn([otslogBin, ...args], {
@@ -164,23 +190,119 @@ export class SegmentWatcher {
       stderr: "pipe",
     });
 
+    this.retrying.delete(filename);
+    const retryTimer = this.retryTimers.get(filename);
+    if (retryTimer) {
+      clearTimeout(retryTimer);
+      this.retryTimers.delete(filename);
+    }
+
     this.active.set(filename, proc);
     this.opts.onStatus(filename, "started");
 
     // Drain stderr → filter debug lines → broadcast
     (async () => {
+      let sawIdleStop = false;
+      let sawPanic = false;
+
       try {
         for await (const line of splitLines(proc.stderr as ReadableStream<Uint8Array>)) {
           if (line.startsWith("[src/")) continue; // Rust dbg!() noise
+
+          const lower = line.toLowerCase();
+          if (lower.includes("idle for") && lower.includes("stopping")) {
+            sawIdleStop = true;
+          }
+          if (lower.includes("panicked") || lower.includes("fixme: handle timeouts")) {
+            sawPanic = true;
+          }
+
           this.opts.onLine(filename, line);
         }
       } finally {
         this.active.delete(filename);
-        if (!this.stopped) {
-          console.log(`[watcher] stamp finished for ${filename}`);
-          this.opts.onStatus(filename, "done");
+
+        if (this.stopped) {
+          return;
         }
+
+        const shouldRetry = await this.shouldRetryAfterExit(fullPath, idleTimeout, sawIdleStop);
+        let retryReason: string | null = null;
+
+        if (shouldRetry) {
+          retryReason = sawPanic ? "panic/timeout" : "unexpected exit";
+        } else {
+          const entryCount = await this.countStampEntries(fullPath);
+          if (entryCount <= 0) {
+            retryReason = "verification failed (0 stamp entries)";
+          }
+        }
+
+        if (retryReason) {
+          const attempt = (this.retryAttempts.get(filename) ?? 0) + 1;
+          this.retryAttempts.set(filename, attempt);
+          const backoffMs = this.retryDelayMs(attempt);
+          this.retrying.add(filename);
+
+          console.warn(`[watcher] stamp ${retryReason} for ${filename}; retrying in ${backoffMs}ms (attempt ${attempt})`);
+          this.opts.onLine(filename, `stamp ${retryReason}; retrying in ${Math.round(backoffMs / 1000)}s (attempt ${attempt})`);
+
+          const timer = setTimeout(() => {
+            this.retryTimers.delete(filename);
+            if (this.stopped) return;
+            if (this.active.has(filename)) return;
+            this.spawnStamp(fullPath, filename);
+          }, backoffMs);
+          this.retryTimers.set(filename, timer);
+          return;
+        }
+
+        this.retryAttempts.delete(filename);
+        this.retrying.delete(filename);
+        console.log(`[watcher] stamp finished for ${filename}`);
+        this.opts.onStatus(filename, "done");
       }
     })();
+  }
+
+  private retryDelayMs(attempt: number): number {
+    return Math.min(10_000, 500 * Math.pow(2, Math.max(0, attempt - 1)));
+  }
+
+  private async shouldRetryAfterExit(fullPath: string, idleTimeout: number, sawIdleStop: boolean): Promise<boolean> {
+    if (sawIdleStop) return false;
+
+    const { stat } = await import("node:fs/promises");
+    const first = await stat(fullPath).catch(() => null);
+    if (!first) return false;
+
+    const idleWindowMs = idleTimeout * 1000;
+    const ageMs = Date.now() - first.mtimeMs;
+    if (ageMs > idleWindowMs + 2_000) {
+      return false;
+    }
+
+    await new Promise((r) => setTimeout(r, 1_000));
+    const second = await stat(fullPath).catch(() => null);
+    if (!second) return false;
+
+    if (second.size > first.size) {
+      return true;
+    }
+
+    const ageAfterWaitMs = Date.now() - second.mtimeMs;
+    return ageAfterWaitMs <= idleWindowMs;
+  }
+
+  private async countStampEntries(fullPath: string): Promise<number> {
+    try {
+      const entries = await list({
+        bin: this.opts.otslogBin,
+        srcPath: fullPath,
+      });
+      return entries.length;
+    } catch {
+      return 0;
+    }
   }
 }

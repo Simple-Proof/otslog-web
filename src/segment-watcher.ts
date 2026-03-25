@@ -25,6 +25,7 @@ export interface SegmentWatcherOpts {
   idleTimeout?: number;
   timeoutSeconds?: number;
   minAttestations?: number;
+  aggregators?: string[];
   /** Called for every line of otslog output (for broadcasting) */
   onLine: (segment: string, line: string) => void;
   /** Called when a segment's stamp process starts or stops */
@@ -166,7 +167,7 @@ export class SegmentWatcher {
   }
 
   private spawnStamp(fullPath: string, filename: string) {
-    const { otslogBin, followInterval, idleTimeout = 30, timeoutSeconds, minAttestations } = this.opts;
+    const { otslogBin, followInterval, idleTimeout = 30, timeoutSeconds, minAttestations, aggregators } = this.opts;
 
     const args = [
       "stamp",
@@ -181,6 +182,13 @@ export class SegmentWatcher {
 
     if (typeof minAttestations === "number" && Number.isFinite(minAttestations) && minAttestations > 0) {
       args.push("-m", String(minAttestations));
+    }
+
+    if (Array.isArray(aggregators) && aggregators.length > 0) {
+      for (const agg of aggregators) {
+        if (!agg) continue;
+        args.push("-a", agg);
+      }
     }
 
     console.log(`[watcher] stamping ${filename}: ${otslogBin} ${args.join(" ")}`);

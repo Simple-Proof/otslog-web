@@ -13,6 +13,7 @@ services:
       - SEGMENT_CLEANUP_INTERVAL_SECONDS=${SEGMENT_CLEANUP_INTERVAL_SECONDS:-900}
       - STAMP_TIMEOUT_SECONDS=${STAMP_TIMEOUT_SECONDS:-30}
       - STAMP_MIN_ATTESTATIONS=${STAMP_MIN_ATTESTATIONS:-1}
+      - STAMP_AGGREGATORS=${STAMP_AGGREGATORS:-https://alice.btc.calendar.opentimestamps.org/digest,https://bob.btc.calendar.opentimestamps.org/digest}
       - CAMERAS=${CAMERAS}
       - CAM01_NAME=${CAM01_NAME}
       - CAM01_HLS_URL=${CAM01_HLS_URL}

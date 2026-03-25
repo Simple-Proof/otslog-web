@@ -118,6 +118,10 @@ const segmentRetentionHours = Math.max(1, parseInt(process.env["SEGMENT_RETENTIO
 const segmentCleanupIntervalSeconds = Math.max(60, parseInt(process.env["SEGMENT_CLEANUP_INTERVAL_SECONDS"] ?? "900", 10) || 900);
 const stampTimeoutSeconds = Math.max(5, parseInt(process.env["STAMP_TIMEOUT_SECONDS"] ?? "30", 10) || 30);
 const stampMinAttestations = Math.max(1, parseInt(process.env["STAMP_MIN_ATTESTATIONS"] ?? "1", 10) || 1);
+const stampAggregators = (process.env["STAMP_AGGREGATORS"] ?? "https://alice.btc.calendar.opentimestamps.org/digest,https://bob.btc.calendar.opentimestamps.org/digest")
+  .split(",")
+  .map((s) => s.trim())
+  .filter((s) => s.length > 0);
 
 interface RetentionStats {
   enabled: boolean;
@@ -1274,6 +1278,7 @@ function autoStartWatcher() {
       idleTimeout,
       timeoutSeconds: stampTimeoutSeconds,
       minAttestations: stampMinAttestations,
+      aggregators: stampAggregators,
       onLine: (segment, line) => {
         const segName = basename(segment)!;
         console.log(`[otslog:${camera.id}:${segName}] ${line}`);
@@ -1316,7 +1321,7 @@ function autoStartWatcher() {
 
     watcher.start();
     watchers.set(camera.id, watcher);
-    console.log(`[boot] segment watcher started for ${camera.id} (${segmentDir}/${camera.segmentPrefix}*.mp4, follow=${followInterval}s, idle-timeout=${idleTimeout}s, timeout=${stampTimeoutSeconds}s, min-attestations=${stampMinAttestations})`);
+    console.log(`[boot] segment watcher started for ${camera.id} (${segmentDir}/${camera.segmentPrefix}*.mp4, follow=${followInterval}s, idle-timeout=${idleTimeout}s, timeout=${stampTimeoutSeconds}s, min-attestations=${stampMinAttestations}, aggregators=${stampAggregators.length})`);
   }
 }
 

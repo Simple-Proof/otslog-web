@@ -16,6 +16,15 @@ export interface FfmpegOpts {
    */
   segmentDir: string;
   /**
+   * Directory where HLS playlist and .ts segments will be written.
+   * If not provided, HLS is not generated locally.
+   */
+  hlsDir?: string;
+  /**
+   * Camera ID, used as subdirectory name under hlsDir.
+   */
+  cameraId?: string;
+  /**
    * Segment duration in seconds (default: 600 = 10 minutes).
    * ffmpeg is killed and restarted with a new filename every segmentTime
    * seconds. This is done at the application level (not via -f segment)
@@ -52,20 +61,28 @@ export function isFfmpegRunning(): boolean {
 // ---------------------------------------------------------------------------
 
 function buildFfmpegArgs(opts: FfmpegOpts, segmentFile: string): string[] {
-  return [
-    // Input
+  const args: string[] = [
     "-rtsp_transport", "tcp",
     "-i", opts.rtspUrl,
-
-    // Output 1: growing fMP4 (for otslog stamping)
-    // Uses -f mp4 (NOT -f segment) because otslog requires strict
-    // append-only files. Rotation is handled by killing/restarting ffmpeg.
     "-c:v", "copy",
     "-an",
-    "-f", "mp4",
-    "-movflags", "frag_keyframe+empty_moov+default_base_moof",
-    segmentFile,
   ];
+
+  if (opts.hlsDir && opts.cameraId) {
+    const hlsOut = `${opts.hlsDir}/${opts.cameraId}`;
+    args.push(
+      "-f", "tee",
+      `[f=mp4:movflags=frag_keyframe+empty_moov+default_base_moof]${segmentFile}|[f=hls:hls_time=4:hls_list_size=10:hls_flags=delete_segments]${hlsOut}/live.m3u8`,
+    );
+  } else {
+    args.push(
+      "-f", "mp4",
+      "-movflags", "frag_keyframe+empty_moov+default_base_moof",
+      segmentFile,
+    );
+  }
+
+  return args;
 }
 
 // ---------------------------------------------------------------------------
@@ -86,6 +103,7 @@ export async function startFfmpeg(opts: FfmpegOpts): Promise<FfmpegProcess> {
   }
 
   await mkdir(opts.segmentDir, { recursive: true });
+  if (opts.hlsDir) await mkdir(opts.hlsDir, { recursive: true });
 
   const bin = opts.bin ?? "ffmpeg";
   const segmentTime = opts.segmentTime ?? 600;

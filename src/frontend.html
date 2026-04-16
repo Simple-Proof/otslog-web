@@ -1239,7 +1239,7 @@
         </div>
     </div>
 
-    <script src="/vendor/hls.min.js"></script>
+    <link rel="preload" href="/vendor/hls.min.js" as="script">
     <script>
         (function () {
             "use strict";
@@ -1335,16 +1335,14 @@
             });
 
             function loadCameraConfig() {
-                return fetch("/api/cameras")
+                return fetch("/api/init")
                     .then(function (response) {
-                        if (!response.ok) throw new Error("camera config HTTP " + response.status);
+                        if (!response.ok) throw new Error("init HTTP " + response.status);
                         return response.json();
                     })
                     .then(function (data) {
                         cameras = (data && data.cameras) ? data.cameras : [];
-                        if (!cameras.length) {
-                            throw new Error("no cameras configured");
-                        }
+                        if (!cameras.length) throw new Error("no cameras configured");
 
                         var urlParams = new URLSearchParams(window.location.search);
                         var camParam = urlParams.get("cam");
@@ -1352,9 +1350,7 @@
                         if (camParam) {
                             var camIdFromUrl = camParam.length === 1 ? "cam0" + camParam : (camParam.length === 2 ? "cam" + camParam : camParam);
                             var matchedCamera = cameras.find(function (c) { return c.id === camIdFromUrl || c.id.replace("cam0", "") === camParam; });
-                            if (matchedCamera) {
-                                selectedCamera = matchedCamera;
-                            }
+                            if (matchedCamera) selectedCamera = matchedCamera;
                         }
 
                         cameraSelect.innerHTML = "";
@@ -1370,7 +1366,58 @@
                         streamUrl = selectedCamera.hlsUrl;
                         initPlayer(streamUrl);
                         applyCameraFilter();
-                        loadStampsFromDb();
+
+                        var camId = activeCameraId;
+
+                        // DB segments (replaces /api/segments-sql)
+                        if (data.dbSegments && data.dbSegments.length) {
+                            data.dbSegments.forEach(function (segData) {
+                                if (segments[segData.name]) {
+                                    if (segData.completed && segments[segData.name].el.parentNode !== paneHistory) {
+                                        segments[segData.name].el.classList.add("completed");
+                                        segments[segData.name].el.classList.add("collapsed");
+                                        paneHistory.prepend(segments[segData.name].el);
+                                    }
+                                    return;
+                                }
+                                var segCamId = segData.camera_id || segData.name.split("_")[0];
+                                if (segCamId !== camId) return;
+                                var seg = getOrCreateSegment(segData.name);
+                                if (!seg) return;
+                                if (segData.completed) {
+                                    seg.el.classList.add("completed");
+                                    seg.el.classList.add("collapsed");
+                                    paneHistory.prepend(seg.el);
+                                }
+                            });
+                        }
+
+                        // File segments (replaces /api/segments)
+                        if (data.segments && data.segments.length) {
+                            data.segments.forEach(function (segData) {
+                                if (!segData.name || !segData.name.endsWith(".mp4")) return;
+                                var segCamId = segData.cameraId || segData.camera_id || segData.name.split("_")[0];
+                                if (segCamId !== camId) return;
+                                var seg = getOrCreateSegment(segData.name);
+                                if (!seg) return;
+                                if (segData.stamping) {
+                                    seg.el.classList.remove("completed");
+                                    if (seg.el.parentNode !== paneActive) paneActive.prepend(seg.el);
+                                    addStatus(seg, "started");
+                                }
+                            });
+                        }
+
+                        // Stamp counts (replaces /api/stamp-counts)
+                        if (data.stampCounts && data.stampCounts.length) {
+                            data.stampCounts.forEach(function (row) {
+                                var seg = segments[row.segment_name];
+                                if (seg) {
+                                    seg.count = row.stamps;
+                                    seg.countEl.textContent = row.stamps + (row.stamps === 1 ? " stamp" : " stamps");
+                                }
+                            });
+                        }
                     });
             }
 
@@ -1935,6 +1982,14 @@
 
             function initPlayer(url) {
                 destroyPlayer();
+
+                if (typeof Hls === "undefined") {
+                    var s = document.createElement("script");
+                    s.src = "/vendor/hls.min.js";
+                    s.onload = function () { initPlayer(url); };
+                    document.head.appendChild(s);
+                    return;
+                }
 
                 if (typeof Hls !== "undefined" && Hls.isSupported()) {
                     hls = new Hls({

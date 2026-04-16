@@ -35,6 +35,7 @@ const { values } = parseArgs({
 const port           = parseInt(values.port as string, 10) || 3777;
 const otslogBin      = values["otslog-bin"] as string | undefined;
 const segmentDir     = resolve(values["segment-dir"] as string);
+const hlsDir         = join(segmentDir, "hls");
 const segmentTime    = parseInt(values["segment-time"] as string, 10) || 600;
 const segmentPrefix  = values["segment-prefix"] as string;
 const followInterval = parseInt(values["follow-interval"] as string, 10) || 1;
@@ -53,6 +54,7 @@ interface CameraConfig {
   rtspUrl: string;
   hlsUrl: string;
   segmentPrefix: string;
+  localHls?: boolean;
 }
 
 function cameraEnvPrefix(cameraId: string): string {
@@ -69,8 +71,8 @@ function parseCameraConfigs(): CameraConfig[] {
       const key = cameraEnvPrefix(id);
       const camRtsp = process.env[`${key}_RTSP_URL`];
       const camHls = process.env[`${key}_HLS_URL`];
-      if (!camRtsp || !camHls) {
-        console.warn(`[boot] skipping camera '${id}': missing ${key}_RTSP_URL or ${key}_HLS_URL`);
+      if (!camRtsp) {
+        console.warn(`[boot] skipping camera '${id}': missing ${key}_RTSP_URL`);
         continue;
       }
 
@@ -78,7 +80,8 @@ function parseCameraConfigs(): CameraConfig[] {
         id,
         name: process.env[`${key}_NAME`] ?? id.toUpperCase(),
         rtspUrl: camRtsp,
-        hlsUrl: camHls,
+        hlsUrl: camHls ?? `/stream/${id}/live.m3u8`,
+        localHls: !camHls,
         segmentPrefix: `${id}_output_`,
       });
     }
@@ -86,12 +89,14 @@ function parseCameraConfigs(): CameraConfig[] {
     if (cameras.length > 0) return cameras;
   }
 
+  const envHlsUrl = process.env["HLS_URL"];
   if (!rtspUrl) return [];
   return [{
     id: "default",
     name: process.env["CAMERA_NAME"] ?? "Default",
     rtspUrl,
-    hlsUrl: process.env["HLS_URL"] ?? "https://stream.simpleproof.xyz/stream/index.m3u8",
+    hlsUrl: envHlsUrl ?? `/stream/default/live.m3u8`,
+    localHls: !envHlsUrl,
     segmentPrefix,
   }];
 }
@@ -663,6 +668,13 @@ const app = new Hono();
 const { upgradeWebSocket, websocket } = createBunWebSocket();
 
 // ---------------------------------------------------------------------------
+// Pre-compress hls.min.js once at startup (~542KB → ~170KB)
+let hlsJsGzipped: Uint8Array | null = null;
+Bun.file("./src/vendor/hls.min.js").arrayBuffer().then((buf) => {
+  hlsJsGzipped = Bun.gzipSync(new Uint8Array(buf));
+}).catch(() => {});
+
+// ---------------------------------------------------------------------------
 // Static routes
 // ---------------------------------------------------------------------------
 
@@ -709,9 +721,41 @@ app.get("/og-image.webp", async (c) => {
 });
 
 app.get("/vendor/hls.min.js", async (c) => {
-  const file = Bun.file("./src/vendor/hls.min.js");
+  const acceptEncoding = c.req.header("Accept-Encoding") ?? "";
+  if (hlsJsGzipped && acceptEncoding.includes("gzip")) {
+    return new Response(hlsJsGzipped, {
+      headers: {
+        "Content-Type": "application/javascript",
+        "Content-Encoding": "gzip",
+        "Cache-Control": "public, max-age=31536000, immutable",
+        "Vary": "Accept-Encoding",
+      },
+    });
+  }
+  return new Response(await Bun.file("./src/vendor/hls.min.js").arrayBuffer(), {
+    headers: {
+      "Content-Type": "application/javascript",
+      "Cache-Control": "public, max-age=31536000, immutable",
+    },
+  });
+});
+
+app.get("/stream/*", async (c) => {
+  const requestPath = c.req.path.replace(/^\/stream\//, "");
+  if (!requestPath || requestPath.includes("..") || requestPath.startsWith("/")) {
+    return c.text("Forbidden", 403);
+  }
+  const filePath = `${hlsDir}/${requestPath}`;
+  const file = Bun.file(filePath);
+  if (!await file.exists()) return c.text("Not Found", 404);
+  let contentType = "application/octet-stream";
+  if (requestPath.endsWith(".m3u8")) contentType = "application/vnd.apple.mpegurl";
+  else if (requestPath.endsWith(".ts")) contentType = "video/mp2t";
   return c.body(await file.arrayBuffer(), {
-    headers: { "Content-Type": "application/javascript" },
+    headers: {
+      "Content-Type": contentType,
+      "Access-Control-Allow-Origin": "*",
+    },
   });
 });
 
@@ -1033,6 +1077,52 @@ app.get("/api/cameras", (c) => {
   });
 });
 
+// Single endpoint for initial page load — replaces 4 sequential calls
+app.get("/api/init", async (c) => {
+  const { readdir, stat } = await import("node:fs/promises");
+  const [files, dbSegs, counts] = await Promise.all([
+    readdir(segmentDir).catch(() => [] as string[]),
+    Promise.resolve(getSegments()),
+    Promise.resolve(getStampCounts()),
+  ]);
+  const segments = await Promise.all(
+    files
+      .filter((f) => isPrimarySegmentName(f))
+      .sort()
+      .map(async (f) => {
+        const fullPath = join(segmentDir, f);
+        const s = await stat(fullPath).catch(() => null);
+        const active = allActiveSegments().includes(f);
+        const cameraId = findCameraBySegmentName(f)?.id ?? "default";
+        return { name: f, cameraId, path: fullPath, size: s?.size ?? 0, mtime: s?.mtime?.toISOString() ?? null, stamping: active };
+      })
+  );
+  return c.json({
+    cameras: cameras.map((cam) => ({ id: cam.id, name: cam.name, hlsUrl: cam.hlsUrl })),
+    segments,
+    dbSegments: dbSegs,
+    stampCounts: counts,
+  });
+});
+
+app.post("/api/internal/stamp-event", (c) => {
+  let body: { segment?: string; line?: string; status?: string };
+  try { body = c.req.json(); }
+  catch { return c.json({ error: "Invalid JSON" }, 400); }
+
+  const segment = body.segment ?? "unknown";
+  const line = body.line;
+  const status = body.status;
+
+  if (status) {
+    broadcastStatus(segment, status);
+  } else if (line) {
+    broadcastLine(segment, line);
+  }
+
+  return c.json({ ok: true });
+});
+
 // ---------------------------------------------------------------------------
 // WebSocket: /ws/stamp
 // ---------------------------------------------------------------------------
@@ -1044,17 +1134,17 @@ app.get(
       stampClients.add(ws);
       console.log(`[ws/stamp] client connected (${stampClients.size} total)`);
 
-      // Send active segments status
-      const active = allActiveSegments();
+      // Send active segments status (watchers.size > 0 means stamping is running)
       ws.send(JSON.stringify({
-        status: active.length > 0
-          ? `stamping: ${active.join(", ")}`
+        status: watchers.size > 0
+          ? "started"
           : "idle",
       }));
 
-      // Replay recent history
-      for (const line of stampBuffer) {
-        ws.send(JSON.stringify({ line }));
+      // Replay recent history (status entries use { status } so frontend updates state)
+      for (const entry of stampBuffer) {
+        const isStatus = /\]\s+(started|done|error|running|exited|idle|stopping)/.test(entry);
+        ws.send(JSON.stringify(isStatus ? { status: entry } : { line: entry }));
       }
     },
 
@@ -1228,6 +1318,8 @@ async function autoStartFfmpeg() {
       const proc = await startFfmpeg({
         rtspUrl: camera.rtspUrl,
         segmentDir,
+        hlsDir: camera.localHls ? hlsDir : undefined,
+        cameraId: camera.localHls ? camera.id : undefined,
         segmentTime,
         segmentPrefix: camera.segmentPrefix,
         bin: ffmpegBin,

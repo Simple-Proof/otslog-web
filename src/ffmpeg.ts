@@ -60,29 +60,33 @@ export function isFfmpegRunning(): boolean {
 // Build args
 // ---------------------------------------------------------------------------
 
-function buildFfmpegArgs(opts: FfmpegOpts, segmentFile: string): string[] {
-  const args: string[] = [
+function buildMp4Args(opts: FfmpegOpts, segmentFile: string): string[] {
+  return [
     "-rtsp_transport", "tcp",
     "-i", opts.rtspUrl,
+    "-map", "0:v",
     "-c:v", "copy",
     "-an",
+    "-f", "mp4",
+    "-movflags", "frag_keyframe+empty_moov+default_base_moof",
+    segmentFile,
   ];
+}
 
-  if (opts.hlsDir && opts.cameraId) {
-    const hlsOut = `${opts.hlsDir}/${opts.cameraId}`;
-    args.push(
-      "-f", "tee",
-      `[f=mp4:movflags=frag_keyframe+empty_moov+default_base_moof]${segmentFile}|[f=hls:hls_time=4:hls_list_size=10:hls_flags=delete_segments]${hlsOut}/live.m3u8`,
-    );
-  } else {
-    args.push(
-      "-f", "mp4",
-      "-movflags", "frag_keyframe+empty_moov+default_base_moof",
-      segmentFile,
-    );
-  }
-
-  return args;
+function buildHlsArgs(opts: FfmpegOpts): string[] {
+  const hlsOut = `${opts.hlsDir}/${opts.cameraId}`;
+  return [
+    "-rtsp_transport", "tcp",
+    "-i", opts.rtspUrl,
+    "-map", "0:v",
+    "-c:v", "copy",
+    "-an",
+    "-f", "hls",
+    "-hls_time", "4",
+    "-hls_list_size", "10",
+    "-hls_flags", "delete_segments",
+    `${hlsOut}/live.m3u8`,
+  ];
 }
 
 // ---------------------------------------------------------------------------
@@ -93,17 +97,23 @@ function buildFfmpegArgs(opts: FfmpegOpts, segmentFile: string): string[] {
 const MIN_LIFETIME_MS = 5_000;
 
 export async function startFfmpeg(opts: FfmpegOpts): Promise<FfmpegProcess> {
+  const useHls = opts.hlsDir && opts.cameraId;
   const instanceKey = opts.instanceKey ?? `${opts.segmentDir}|${opts.segmentPrefix ?? "output_"}`;
 
   // Kill any previously running ffmpeg
-  const previousProc = activeFfmpegProcs.get(instanceKey);
-  if (previousProc) {
-    previousProc.kill();
-    activeFfmpegProcs.delete(instanceKey);
+  for (const [key, proc] of activeFfmpegProcs) {
+    if (key.startsWith(instanceKey)) {
+      proc.kill();
+      activeFfmpegProcs.delete(key);
+    }
   }
 
   await mkdir(opts.segmentDir, { recursive: true });
-  if (opts.hlsDir) await mkdir(opts.hlsDir, { recursive: true });
+  if (useHls) {
+    await mkdir(opts.hlsDir!, { recursive: true });
+    const cameraId = opts.cameraId ?? "default";
+    await mkdir(`${opts.hlsDir}/${cameraId}`, { recursive: true });
+  }
 
   const bin = opts.bin ?? "ffmpeg";
   const segmentTime = opts.segmentTime ?? 600;
@@ -111,32 +121,32 @@ export async function startFfmpeg(opts: FfmpegOpts): Promise<FfmpegProcess> {
 
   let stopped = false;
   let counter = 0;
-  let currentProc: Subprocess | null = null;
-  let rotationTimer: ReturnType<typeof setTimeout> | null = null;
+  let mp4Proc: Subprocess | null = null;
+  let hlsProc: Subprocess | null = null;
+  let mp4RotationTimer: ReturnType<typeof setTimeout> | null = null;
 
   function nextFilename(): string {
     const idx = String(counter++).padStart(3, "0");
     return `${opts.segmentDir}/${prefix}${idx}.mp4`;
   }
 
-  function spawnSegment(): Subprocess {
+  function spawnMp4(): Subprocess {
     const file = nextFilename();
-    const args = buildFfmpegArgs(opts, file);
-    console.log(`[ffmpeg] → ${basename(file)}: ${bin} ${args.join(" ")}`);
+    const args = buildMp4Args(opts, file);
+    console.log(`[ffmpeg:mp4] → ${basename(file)}: ${bin} ${args.join(" ")}`);
 
     const proc = Bun.spawn([bin, ...args], {
       stdout: "ignore",
       stderr: "pipe",
     });
 
-    currentProc = proc;
-    activeFfmpegProcs.set(instanceKey, proc);
+    mp4Proc = proc;
+    activeFfmpegProcs.set(`${instanceKey}:mp4`, proc);
 
-    // Schedule rotation kill
     if (segmentTime > 0) {
-      rotationTimer = setTimeout(() => {
-        if (currentProc === proc && !stopped) {
-          console.log(`[ffmpeg] rotating (${segmentTime}s elapsed)`);
+      mp4RotationTimer = setTimeout(() => {
+        if (mp4Proc === proc && !stopped) {
+          console.log(`[ffmpeg:mp4] rotating (${segmentTime}s elapsed)`);
           proc.kill();
         }
       }, segmentTime * 1000);
@@ -145,28 +155,44 @@ export async function startFfmpeg(opts: FfmpegOpts): Promise<FfmpegProcess> {
     return proc;
   }
 
-  // Spawn first segment immediately
-  const firstProc = spawnSegment();
+  function spawnHls(): Subprocess {
+    const args = buildHlsArgs(opts);
+    console.log(`[ffmpeg:hls] → HLS: ${bin} ${args.join(" ")}`);
+
+    const proc = Bun.spawn([bin, ...args], {
+      stdout: "ignore",
+      stderr: "pipe",
+    });
+
+    hlsProc = proc;
+    activeFfmpegProcs.set(`${instanceKey}:hls`, proc);
+
+    return proc;
+  }
+
+  const firstMp4 = spawnMp4();
+  if (useHls) {
+    spawnHls();
+  }
 
   async function* rotatingLines(): AsyncGenerator<string> {
-    let proc = firstProc;
+    let mp4 = firstMp4;
+    let hls = useHls && hlsProc ? hlsProc : null;
 
     while (!stopped) {
       const startTime = Date.now();
 
-      for await (const line of splitLines(proc.stderr as ReadableStream<Uint8Array>)) {
-        yield line;
+      for await (const line of splitLines(mp4.stderr as ReadableStream<Uint8Array>)) {
+        yield `[mp4] ${line}`;
       }
 
       if (stopped) break;
 
-      // Clear stale rotation timer (process may have exited before timer fired)
-      if (rotationTimer) {
-        clearTimeout(rotationTimer);
-        rotationTimer = null;
+      if (mp4RotationTimer) {
+        clearTimeout(mp4RotationTimer);
+        mp4RotationTimer = null;
       }
 
-      // Guard against tight crash loops — if ffmpeg died too quickly, wait
       const lifetime = Date.now() - startTime;
       if (lifetime < MIN_LIFETIME_MS) {
         if (counter > 0) counter--;
@@ -176,26 +202,28 @@ export async function startFfmpeg(opts: FfmpegOpts): Promise<FfmpegProcess> {
 
       if (stopped) break;
 
-      proc = spawnSegment();
+      mp4 = spawnMp4();
     }
 
-    // Final cleanup
-    if (activeFfmpegProcs.get(instanceKey) === currentProc) {
-      activeFfmpegProcs.delete(instanceKey);
-    }
+    activeFfmpegProcs.delete(`${instanceKey}:mp4`);
   }
 
   function stop() {
     stopped = true;
-    if (rotationTimer) {
-      clearTimeout(rotationTimer);
-      rotationTimer = null;
+    if (mp4RotationTimer) {
+      clearTimeout(mp4RotationTimer);
+      mp4RotationTimer = null;
     }
-    if (currentProc) {
-      currentProc.kill();
-      currentProc = null;
+    if (mp4Proc) {
+      mp4Proc.kill();
+      mp4Proc = null;
     }
-    activeFfmpegProcs.delete(instanceKey);
+    if (hlsProc) {
+      hlsProc.kill();
+      hlsProc = null;
+    }
+    activeFfmpegProcs.delete(`${instanceKey}:mp4`);
+    activeFfmpegProcs.delete(`${instanceKey}:hls`);
   }
 
   return { stop, lines: rotatingLines() };

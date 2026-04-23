@@ -1,11 +1,7 @@
 #!/bin/bash
 set -e
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# otslog-web install script
-# Detects and installs ffmpeg and bun if missing
-# Makes otslog executable
-# ═══════════════════════════════════════════════════════════════════════════════
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 echo "[install] Starting..."
 
@@ -26,7 +22,6 @@ else
 fi
 echo "[install] Detected package manager: $PKG_MANAGER"
 
-# ── Install ffmpeg ───────────────────────────────────────────────────────────
 if command -v ffmpeg &>/dev/null; then
     echo "[install] ffmpeg found: $(ffmpeg -version 2>&1 | head -1)"
 else
@@ -44,13 +39,11 @@ else
     echo "[install] ffmpeg installed: $(ffmpeg -version 2>&1 | head -1)"
 fi
 
-# ── Install bun ───────────────────────────────────────────────────────────────
 if command -v bun &>/dev/null; then
     echo "[install] bun found: $(bun --version)"
 else
     echo "[install] bun not found. Installing..."
 
-    # Detect architecture
     ARCH=$(uname -m)
     case "$ARCH" in
         aarch64|arm64)
@@ -69,7 +62,6 @@ else
     esac
     echo "[install] Detected architecture: $BUN_ARCH"
 
-    # Download and install bun
     BUN_INSTALL_DIR=$(mktemp -d)
     curl -fsSL "https://github.com/oven-sh/bun/releases/latest/download/bun-${BUN_ARCH}.zip" -o "${BUN_INSTALL_DIR}/bun.zip"
     unzip -q "${BUN_INSTALL_DIR}/bun.zip" -d "${BUN_INSTALL_DIR}"
@@ -81,19 +73,58 @@ else
 fi
 
 # ── Make otslog executable ───────────────────────────────────────────────────
-OTSLOG_PATH="./otslog"
+OTSLOG_PATH="$SCRIPT_DIR/otslog"
 if [ -f "$OTSLOG_PATH" ]; then
     chmod +x "$OTSLOG_PATH"
-    echo "[install] otslog made executable: $OTSLOG_PATH"
+    echo "[install] otslog made executable"
 else
     echo "[install] WARNING: otslog not found at $OTSLOG_PATH (skipping)"
 fi
 
-# ── Final check ───────────────────────────────────────────────────────────────
+if [ "$1" = "--with-service" ] || [ "$1" = "-s" ]; then
+    echo "[install] Setting up systemd service..."
+
+    SERVICE_NAME="otslog-web"
+    SERVICE_FILE="/etc/systemd/system/$SERVICE_NAME.service"
+    START_SCRIPT="$SCRIPT_DIR/start.sh"
+    RUN_AS_USER="${SUDO_USER:-$(whoami)}"
+
+    if [ ! -f "$START_SCRIPT" ]; then
+        echo "[install] ERROR: start.sh not found at $START_SCRIPT"
+        exit 1
+    fi
+
+    sudo tee "$SERVICE_FILE" > /dev/null << EOF
+[Unit]
+Description=otslog-web: RTSP to OpenTimestamps video capture
+After=network.target
+
+[Service]
+Type=forking
+ExecStart=$START_SCRIPT start
+ExecStop=$START_SCRIPT stop
+Restart=always
+RestartSec=5
+User=$RUN_AS_USER
+WorkingDirectory=$SCRIPT_DIR
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+    sudo systemctl daemon-reload
+    sudo systemctl enable "$SERVICE_NAME"
+    echo "[install] systemd service installed at $SERVICE_FILE"
+    echo "[install] To start: sudo systemctl start $SERVICE_NAME"
+    echo "[install] To check status: sudo systemctl status $SERVICE_NAME"
+fi
+
 echo ""
 echo "[install] Final verification:"
 echo "  ffmpeg: $(command -v ffmpeg && ffmpeg -version 2>&1 | head -1 || echo 'NOT FOUND')"
 echo "  bun:    $(command -v bun && bun --version || echo 'NOT FOUND')"
 echo "  otslog: $(ls -la "$OTSLOG_PATH" 2>/dev/null | awk '{print $1, $9}' || echo 'NOT FOUND')"
 echo ""
-echo "[install] Done. Run 'bun run src/index.ts --otslog-bin ./otslog' to start."
+echo "[install] Done."
+echo "[install] Run './start.sh start' to start in background"
+echo "[install] Or run with --with-service to setup auto-start on reboot"

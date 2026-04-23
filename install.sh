@@ -77,10 +77,16 @@ else
     sudo chmod +x /usr/local/bin/bun
     rm -rf "$BUN_INSTALL_DIR"
 
-    echo "[install] bun installed: $(bun --version)"
+echo "[install] bun installed: $(bun --version)"
 fi
 
-# ── Make otslog executable ───────────────────────────────────────────────────
+BUN_PATH="$(command -v bun 2>/dev/null || echo "$HOME/.bun/bin/bun")"
+if [ -f "$SCRIPT_DIR/package.json" ]; then
+    echo "[install] Running bun install..."
+    cd "$SCRIPT_DIR" && "$BUN_PATH" install
+    echo "[install] Dependencies installed"
+fi
+
 OTSLOG_PATH="$SCRIPT_DIR/otslog"
 if [ -f "$OTSLOG_PATH" ]; then
     chmod +x "$OTSLOG_PATH"

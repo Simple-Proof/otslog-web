@@ -43,7 +43,6 @@ output.mp4.*
 .sisyphus/
 
 # deployment
-otslog
 infra/otslog-web.pem
 infra/.terraform/
 infra/.terraform.lock.hcl

@@ -25,7 +25,17 @@ start() {
 
     cd "$SCRIPT_DIR"
 
-    bun run src/index.ts \
+    local bun_path
+    if command -v bun &>/dev/null; then
+        bun_path="bun"
+    elif [ -x "$HOME/.bun/bin/bun" ]; then
+        bun_path="$HOME/.bun/bin/bun"
+    else
+        echo "[start] ERROR: bun not found in PATH and not at \$HOME/.bun/bin/bun"
+        return 1
+    fi
+
+    "$bun_path" run src/index.ts \
         --otslog-bin "$SCRIPT_DIR/otslog" \
         >> "$LOG_FILE" 2>&1 &
     local pid=$!

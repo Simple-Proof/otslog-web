@@ -39,8 +39,16 @@ else
     echo "[install] ffmpeg installed: $(ffmpeg -version 2>&1 | head -1)"
 fi
 
+if [ -d "$HOME/.bun/install/cache" ]; then
+    echo "[install] Cleaning bun cache..."
+    rm -rf "$HOME/.bun/install/cache"
+    echo "[install] Bun cache cleaned"
+fi
+
 if command -v bun &>/dev/null; then
     echo "[install] bun found: $(bun --version)"
+elif [ -x "$HOME/.bun/bin/bun" ]; then
+    echo "[install] bun found: $($HOME/.bun/bin/bun --version)"
 else
     echo "[install] bun not found. Installing..."
 
@@ -121,8 +129,9 @@ fi
 
 echo ""
 echo "[install] Final verification:"
+BUN_PATH="$(command -v bun 2>/dev/null || echo "$HOME/.bun/bin/bun")"
 echo "  ffmpeg: $(command -v ffmpeg && ffmpeg -version 2>&1 | head -1 || echo 'NOT FOUND')"
-echo "  bun:    $(command -v bun && bun --version || echo 'NOT FOUND')"
+echo "  bun:    $($BUN_PATH --version 2>/dev/null || echo 'NOT FOUND')"
 echo "  otslog: $(ls -la "$OTSLOG_PATH" 2>/dev/null | awk '{print $1, $9}' || echo 'NOT FOUND')"
 echo ""
 echo "[install] Done."

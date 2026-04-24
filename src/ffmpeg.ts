@@ -178,12 +178,25 @@ export async function startFfmpeg(opts: FfmpegOpts): Promise<FfmpegProcess> {
   async function* rotatingLines(): AsyncGenerator<string> {
     let mp4 = firstMp4;
     let hls = useHls && hlsProc ? hlsProc : null;
+    let lastHlsRespawn = 0;
 
     while (!stopped) {
       const startTime = Date.now();
 
       for await (const line of splitLines(mp4.stderr as ReadableStream<Uint8Array>)) {
         yield `[mp4] ${line}`;
+      }
+
+      if (useHls && hlsProc && hlsProc.exited) {
+        const now = Date.now();
+        if (now - lastHlsRespawn < 2000) {
+          console.log(`[ffmpeg:hls] died too quickly, waiting before respawn...`);
+          await new Promise((r) => setTimeout(r, 2000));
+          lastHlsRespawn = Date.now();
+        }
+        console.log(`[ffmpeg:hls] process died (exit code ${hlsProc.exitCode}), respawning...`);
+        hlsProc = spawnHls();
+        lastHlsRespawn = now;
       }
 
       if (stopped) break;

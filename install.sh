@@ -22,6 +22,20 @@ else
 fi
 echo "[install] Detected package manager: $PKG_MANAGER"
 
+if [ ! -f "$SCRIPT_DIR/.env" ] && [ -f "$SCRIPT_DIR/.env.example" ]; then
+    echo ""
+    echo "[install] .env not found. Copying from .env.example..."
+    cp "$SCRIPT_DIR/.env.example" "$SCRIPT_DIR/.env"
+
+    echo ""
+    read -p "[install] Enter RTSP URL (e.g., rtsp://admin:password@192.168.1.100:554/stream): " RTSP_URL
+    if [ -n "$RTSP_URL" ]; then
+        sed -i "s|^RTSP_URL=.*|RTSP_URL=$RTSP_URL|" "$SCRIPT_DIR/.env"
+        echo "[install] RTSP_URL updated in .env"
+    fi
+    echo ""
+fi
+
 if command -v ffmpeg &>/dev/null; then
     echo "[install] ffmpeg found: $(ffmpeg -version 2>&1 | head -1)"
 else

@@ -29,7 +29,8 @@ const { values } = parseArgs({
     "no-ffmpeg": { type: "boolean", default: false },
     "no-stamp": { type: "boolean", default: false },
     clean: { type: "boolean", default: false },
-  },
+    "no-retention": { type: "boolean", default: false },
+   },
 });
 
 const port           = parseInt(values.port as string, 10) || 3777;
@@ -43,6 +44,7 @@ const idleTimeout    = parseInt(values["idle-timeout"] as string, 10) || 40;
 const ffmpegBin      = values["ffmpeg-bin"] as string;
 const noFfmpeg       = values["no-ffmpeg"] as boolean;
 const noStamp        = values["no-stamp"] as boolean;
+const noRetention    = values["no-retention"] as boolean;
 const clean          = values.clean as boolean;
 
 // RTSP_URL from environment (keeps credentials out of process list / ps aux)
@@ -119,7 +121,12 @@ const MAX_ZIP_BYTES = 200 * 1024 * 1024;
 const EXPORT_JOB_TTL_MS = 60 * 60 * 1000;
 const EXPORT_URL_TTL_SECONDS = 60 * 30;
 const exportDir = join(segmentDir, ".exports");
-const segmentRetentionHours = Math.max(1, parseInt(process.env["SEGMENT_RETENTION_HOURS"] ?? "24", 10) || 24);
+const segmentRetentionHours = (() => {
+  const raw = process.env["SEGMENT_RETENTION_HOURS"];
+  if (raw === undefined || raw === "") return 0; // disabled by default
+  const parsed = parseInt(raw, 10);
+  return isNaN(parsed) ? 0 : parsed;
+})();
 const segmentCleanupIntervalSeconds = Math.max(60, parseInt(process.env["SEGMENT_CLEANUP_INTERVAL_SECONDS"] ?? "900", 10) || 900);
 const stampTimeoutSeconds = Math.max(5, parseInt(process.env["STAMP_TIMEOUT_SECONDS"] ?? "30", 10) || 30);
 const stampMinAttestations = Math.max(1, parseInt(process.env["STAMP_MIN_ATTESTATIONS"] ?? "1", 10) || 1);
@@ -1268,6 +1275,12 @@ async function pruneOldSegmentsAndDb(): Promise<{ prunedSegments: number; orphan
 }
 
 function startSegmentRetentionCleaner() {
+  if (noRetention || segmentRetentionHours <= 0) {
+    retentionStats.enabled = false;
+    console.log("[retention] disabled");
+    return;
+  }
+
   retentionStats.enabled = true;
 
   const run = async () => {

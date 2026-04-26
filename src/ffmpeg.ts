@@ -12,7 +12,7 @@ export interface FfmpegOpts {
   rtspUrl: string;
   /**
    * Directory where rotating MP4 segments will be written.
-   * Segments are named output_000.mp4, output_001.mp4 …
+   * Segments are named output_1.mp4, output_2.mp4 … (no zero-padding)
    */
   segmentDir: string;
   /**
@@ -96,6 +96,22 @@ function buildHlsArgs(opts: FfmpegOpts): string[] {
 /** Minimum process lifetime before restarting (avoids tight crash loops) */
 const MIN_LIFETIME_MS = 5_000;
 
+/** Maximum consecutive failures before giving up (circuit breaker) */
+const MAX_CONSECUTIVE_FAILURES = 10;
+
+/** Maximum backoff delay between respawns (30 seconds) */
+const MAX_BACKOFF_MS = 30_000;
+
+/** Recovery delay after circuit breaker — gives camera time to clean stale RTSP sessions (2 minutes) */
+const RECOVERY_BACKOFF_MS = 120_000;
+
+/** Calculate backoff delay: exponential with jitter, capped at MAX_BACKOFF_MS */
+function calcBackoffMs(failures: number): number {
+  const base = Math.min(MIN_LIFETIME_MS * 2 ** failures, MAX_BACKOFF_MS);
+  // Add 0-25% jitter to avoid thundering herd
+  return Math.round(base * (1 + Math.random() * 0.25));
+}
+
 export async function startFfmpeg(opts: FfmpegOpts): Promise<FfmpegProcess> {
   const useHls = opts.hlsDir && opts.cameraId;
   const instanceKey = opts.instanceKey ?? `${opts.segmentDir}|${opts.segmentPrefix ?? "output_"}`;
@@ -119,14 +135,29 @@ export async function startFfmpeg(opts: FfmpegOpts): Promise<FfmpegProcess> {
   const segmentTime = opts.segmentTime ?? 600;
   const prefix = opts.segmentPrefix ?? "output_";
 
-  let stopped = false;
+  const { readdir } = await import("node:fs/promises");
   let counter = 0;
+  const files = await readdir(opts.segmentDir).catch(() => [] as string[]);
+  const suffix = ".mp4";
+  for (const f of files) {
+    if (f.startsWith(prefix) && f.endsWith(suffix)) {
+      const numStr = f.slice(prefix.length, -suffix.length);
+      if (/^\d+$/.test(numStr)) {
+        const num = parseInt(numStr, 10);
+        if (!isNaN(num) && num >= counter) {
+          counter = num + 1;
+        }
+      }
+    }
+  }
+  let stopped = false;
   let mp4Proc: Subprocess | null = null;
   let hlsProc: Subprocess | null = null;
   let mp4RotationTimer: ReturnType<typeof setTimeout> | null = null;
+  let consecutiveFailures = 0;
 
   function nextFilename(): string {
-    const idx = String(counter++).padStart(3, "0");
+    const idx = String(counter++);
     return `${opts.segmentDir}/${prefix}${idx}.mp4`;
   }
 
@@ -170,6 +201,22 @@ export async function startFfmpeg(opts: FfmpegOpts): Promise<FfmpegProcess> {
     return proc;
   }
 
+  /** Kill the sibling process to free camera connections on fatal error */
+  function killSibling(exclude: "mp4" | "hls") {
+    if (exclude !== "hls" && hlsProc) {
+      console.log(`[ffmpeg:hls] killing to free camera connection`);
+      hlsProc.kill();
+      hlsProc = null;
+      activeFfmpegProcs.delete(`${instanceKey}:hls`);
+    }
+    if (exclude !== "mp4" && mp4Proc) {
+      console.log(`[ffmpeg:mp4] killing to free camera connection`);
+      mp4Proc.kill();
+      mp4Proc = null;
+      activeFfmpegProcs.delete(`${instanceKey}:mp4`);
+    }
+  }
+
   const firstMp4 = spawnMp4();
   if (useHls) {
     spawnHls();
@@ -182,11 +229,15 @@ export async function startFfmpeg(opts: FfmpegOpts): Promise<FfmpegProcess> {
 
     while (!stopped) {
       const startTime = Date.now();
+      let hlsRespawnedThisIteration = false;
 
       for await (const line of splitLines(mp4.stderr as ReadableStream<Uint8Array>)) {
         yield `[mp4] ${line}`;
       }
 
+      // Check HLS and respawn independently (with its own cooldown)
+      // Only respawn HLS if MP4 ran successfully this iteration (lifetime unknown yet).
+      // If MP4 crashed (< 5s), HLS will be killed and not respawned until MP4 recovers.
       if (useHls && hlsProc && hlsProc.exited) {
         const now = Date.now();
         if (now - lastHlsRespawn < 2000) {
@@ -194,9 +245,11 @@ export async function startFfmpeg(opts: FfmpegOpts): Promise<FfmpegProcess> {
           await new Promise((r) => setTimeout(r, 2000));
           lastHlsRespawn = Date.now();
         }
+        if (stopped) break;
         console.log(`[ffmpeg:hls] process died (exit code ${hlsProc.exitCode}), respawning...`);
         hlsProc = spawnHls();
-        lastHlsRespawn = now;
+        hlsRespawnedThisIteration = true;
+        lastHlsRespawn = Date.now();
       }
 
       if (stopped) break;
@@ -207,15 +260,54 @@ export async function startFfmpeg(opts: FfmpegOpts): Promise<FfmpegProcess> {
       }
 
       const lifetime = Date.now() - startTime;
+
+      // Process died quickly — this is a crash, not a rotation
       if (lifetime < MIN_LIFETIME_MS) {
-        if (counter > 0) counter--;
-        console.log(`[ffmpeg] process exited after ${lifetime}ms — waiting before restart`);
-        await new Promise((r) => setTimeout(r, MIN_LIFETIME_MS - lifetime));
+        consecutiveFailures++;
+        console.log(`[ffmpeg] process exited after ${lifetime}ms — failure ${consecutiveFailures}/${MAX_CONSECUTIVE_FAILURES}`);
+
+        // Kill HLS immediately to free camera connection
+        if (useHls && hlsProc) {
+          killSibling("mp4");
+          hls = null;
+          hlsRespawnedThisIteration = true; // Prevent respawn on next iteration
+        }
+
+        if (consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
+          console.error(`[ffmpeg] circuit breaker tripped after ${consecutiveFailures} consecutive failures — waiting ${RECOVERY_BACKOFF_MS / 1000}s for camera recovery`);
+          await new Promise((r) => setTimeout(r, RECOVERY_BACKOFF_MS));
+          if (stopped) break;
+          console.log(`[ffmpeg] recovery attempt — resetting failure counter`);
+          consecutiveFailures = 0;
+          // Don't decrement counter — nextFilename already advanced, go back
+          if (counter > 0) counter--;
+        }
+
+        const backoffMs = calcBackoffMs(consecutiveFailures);
+        console.log(`[ffmpeg] backing off ${backoffMs}ms before retry`);
+        await new Promise((r) => setTimeout(r, backoffMs));
+
+        if (stopped) break;
+
+        mp4 = spawnMp4();
+        // Don't spawn HLS during failure recovery — only spawn it on normal rotation
+      } else {
+        // Process ran successfully (at least MIN_LIFETIME_MS) — reset failure counter
+        if (consecutiveFailures > 0) {
+          console.log(`[ffmpeg] resetting failure counter (ran ${lifetime}ms)`);
+        }
+        consecutiveFailures = 0;
+
+        // Normal rotation — respawn HLS only if it died AND we haven't already respawned it
+        if (useHls && !hlsRespawnedThisIteration && (!hlsProc || hlsProc.exited)) {
+          console.log(`[ffmpeg:hls] respawning after MP4 rotation`);
+          hlsProc = spawnHls();
+          hls = hlsProc;
+        }
+
+        if (stopped) break;
+        mp4 = spawnMp4();
       }
-
-      if (stopped) break;
-
-      mp4 = spawnMp4();
     }
 
     activeFfmpegProcs.delete(`${instanceKey}:mp4`);

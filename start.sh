@@ -75,16 +75,23 @@ stop() {
 
     for child_ffmpeg in $(pgrep -P "$pid" 2>/dev/null); do
         echo "[stop] Killing orphaned ffmpeg child (PID $child_ffmpeg)..."
-        kill "$child_ffmpeg" 2>/dev/null || true
-        sleep 1
         kill -9 "$child_ffmpeg" 2>/dev/null || true
     done
 
+    # Kill ALL ffmpeg processes connected to the RTSP camera (not just children)
+    # These accumulate across restarts and exhaust the camera's RTSP session limit
     for child_ffmpeg in $(pgrep -f "ffmpeg.*rtsp" 2>/dev/null); do
         if [ "$child_ffmpeg" != "$pid" ]; then
-            echo "[stop] Killing orphaned ffmpeg (PID $child_ffmpeg)..."
-            kill "$child_ffmpeg" 2>/dev/null || true
-            sleep 1
+            echo "[stop] Killing ffmpeg RTSP process (PID $child_ffmpeg)..."
+            kill -9 "$child_ffmpeg" 2>/dev/null || true
+        fi
+    done
+
+    # Also kill any remaining ffmpeg processes that might be zombie/stuck
+    sleep 1
+    for child_ffmpeg in $(pgrep -f "ffmpeg.*rtsp" 2>/dev/null); do
+        if [ "$child_ffmpeg" != "$pid" ]; then
+            echo "[stop] Force killing stuck ffmpeg (PID $child_ffmpeg)..."
             kill -9 "$child_ffmpeg" 2>/dev/null || true
         fi
     done

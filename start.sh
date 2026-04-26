@@ -60,7 +60,7 @@ stop() {
     fi
 
     echo "[stop] Stopping otslog-web (PID $pid)..."
-    kill "$pid"
+    kill "$pid" 2>/dev/null || true
 
     local count=0
     while kill -0 "$pid" 2>/dev/null && [ $count -lt 10 ]; do
@@ -72,6 +72,22 @@ stop() {
         echo "[stop] Force killing..."
         kill -9 "$pid" 2>/dev/null || true
     fi
+
+    for child_ffmpeg in $(pgrep -P "$pid" 2>/dev/null); do
+        echo "[stop] Killing orphaned ffmpeg child (PID $child_ffmpeg)..."
+        kill "$child_ffmpeg" 2>/dev/null || true
+        sleep 1
+        kill -9 "$child_ffmpeg" 2>/dev/null || true
+    done
+
+    for child_ffmpeg in $(pgrep -f "ffmpeg.*rtsp" 2>/dev/null); do
+        if [ "$child_ffmpeg" != "$pid" ]; then
+            echo "[stop] Killing orphaned ffmpeg (PID $child_ffmpeg)..."
+            kill "$child_ffmpeg" 2>/dev/null || true
+            sleep 1
+            kill -9 "$child_ffmpeg" 2>/dev/null || true
+        fi
+    done
 
     rm -f "$PID_FILE"
     echo "[stop] otslog-web stopped"

@@ -40,6 +40,9 @@ output.mp4
 output.mp4.*
 *.otslog
 *.ots
+*.log
+*.db
+*.pid
 .sisyphus/
 
 # deployment
